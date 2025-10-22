@@ -1,0 +1,64 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2025-10-22 19:43:08.638982",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "digitax_authentication_section",
+  "base_url",
+  "column_break_wknx",
+  "api_key"
+ ],
+ "fields": [
+  {
+   "fieldname": "digitax_authentication_section",
+   "fieldtype": "Section Break",
+   "label": "Digitax Authentication"
+  },
+  {
+   "fieldname": "base_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Base URL",
+   "options": "URL",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_wknx",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "api_key",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "API Key",
+   "reqd": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2025-10-22 19:47:01.688254",
+ "modified_by": "Administrator",
+ "module": "Titan Digitax",
+ "name": "Digitax Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
