@@ -10,7 +10,7 @@ digitax_api_key = get_decrypted_password(
 
 
 def on_submit(doc, method):
-    headers = {"accept": "application/json", "X-API-Key": digitax_api_key}
+    headers = {"accept": "application/json", "X-API-Key": digitax_api_key, "content-type": "application/json"}
     url = ""
     payload = {
         "items": [],
@@ -32,12 +32,12 @@ def on_submit(doc, method):
                     "item_bar_code": item.item_code,
                     "item_tax_type_code": item.custom_tax_type_code or "D",
                     "quantity": item.qty,
-                    "unit_price": item.rate,
-                    "total_amount": item.amount,
+                    "unit_price": item.rate if item.rate > 0 else 0,
+                    "total_amount": item.amount if item.amount > 0 else 0,
                     "package_unit_quantity": item.qty, #TODO: Confirm with Digitax if this is correct
                     # TODO: Confirm with Digitax if discount_rate is percentage or amount
-                    "discount_rate": item.discount_amount,
-                    "discount_amount": item.discount_amount,
+                    "discount_rate": 1 if item.rate < 0 else 0,
+                    "discount_amount": abs(item.amount) if item.amount < 0 else 0,  
                     "item_description": item.description,
                     "is_stockable": True if item.custom_is_stockable else False,
                 }
@@ -46,11 +46,25 @@ def on_submit(doc, method):
         url = f"{digitax_base_url.rstrip('/')}/credit-notes-with-barcode"
 
     payload = json.dumps(payload)
-    # print(f"Payload to be sent to Digitax: \n{payload}\n")
 
     try:
         response = requests.post(url, headers=headers, data=payload)
-        print(f"Response from Digitax: \n{response.json()}\n")
+        response_data = response.json()
+        if response.status_code >= 200 and response.status_code < 300:
+            frappe.db.set_value("Sales Invoice", doc.name, {
+                "custom_offline_url": response_data.get("offline_url"),
+                "custom_sale_detail_url": response_data.get("sale_detail_url"),
+                "custom_serial_number": response_data.get("serial_number"),
+                "custom_invoice_number": response_data.get("invoice_number"),
+                "custom_digitax_status": response_data.get("status"),
+                "custom_sale_id": response_data.get("sale_id"),
+                "custom_date": response_data.get("date"),
+                "custom_time": response_data.get("time"),
+            })
+            frappe.db.commit()
+        else:
+            frappe.db.set_value("Sales Invoice", doc.name, "custom_error_message", response_data.get("message", "Unknown error"))
+            frappe.db.commit()
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
         frappe.log_error(
