@@ -23,25 +23,45 @@ def on_submit(doc, method):
         payload["receipt_type_code"] = "S"
         payload["payment_type_code"] = "01"  # Cash, to be dynamic later. TODO: We need to revisit this.
         payload["invoice_status_code"] = "02" # Stands for "Approved"
+
         for item in doc.items:
-            payload["items"].append(
-                {
-                    "item_name": item.item_name,
-                    # the item_class_code used here is for "services" as per Digitax documentation
-                    "item_class_code": item.custom_item_class_code or "99020000",
-                    "item_bar_code": item.item_code,
-                    "item_tax_type_code": item.custom_tax_type_code or "D",
-                    "quantity": item.qty,
-                    "unit_price": item.rate if item.rate > 0 else 0,
-                    "total_amount": item.amount if item.amount > 0 else 0,
-                    "package_unit_quantity": item.qty, #TODO: Confirm with Digitax if this is correct
-                    # TODO: Confirm with Digitax if discount_rate is percentage or amount
-                    "discount_rate": 1 if item.rate < 0 else 0,
-                    "discount_amount": abs(item.amount) if item.amount < 0 else 0,  
-                    "item_description": item.description,
-                    "is_stockable": True if item.custom_is_stockable else False,
-                }
-            )
+            current_item_bar_code = item.item_code
+            
+            existing_item = None
+            for existing in payload["items"]:
+                if existing["item_bar_code"] == current_item_bar_code:
+                    existing_item = existing
+                    break
+
+            current_quantity = item.qty
+            current_total_amount = item.amount if item.amount > 0 else 0
+            current_package_unit_quantity = item.qty
+            current_discount_amount = abs(item.amount) if item.amount < 0 else 0
+
+            if existing_item:
+                existing_item["quantity"] += current_quantity
+                existing_item["total_amount"] += current_total_amount
+                existing_item["package_unit_quantity"] += current_package_unit_quantity
+                existing_item["discount_amount"] += current_discount_amount
+            else:
+                payload["items"].append(
+                    {
+                        "item_name": item.item_name,
+                        # the item_class_code used here is for "services" as per Digitax documentation
+                        "item_class_code": item.custom_item_class_code or "99020000",
+                        "item_bar_code": item.item_code,
+                        "item_tax_type_code": item.custom_tax_type_code or "D",
+                        "quantity": current_quantity,
+                        "unit_price": item.rate if item.rate > 0 else 0,
+                        "total_amount": current_total_amount,
+                        "package_unit_quantity": current_package_unit_quantity, #TODO: Confirm with Digitax if this is correct
+                        # TODO: Confirm with Digitax if discount_rate is percentage or amount
+                        "discount_rate": 1 if item.rate < 0 else 0,
+                        "discount_amount": current_discount_amount,  
+                        "item_description": item.description,
+                        "is_stockable": True if item.custom_is_stockable else False,
+                    }
+                )
     else:
         url = f"{digitax_base_url.rstrip('/')}/credit-notes-with-barcode"
 
