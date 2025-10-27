@@ -139,7 +139,8 @@ app_license = "gpl-3.0"
 
 doc_events = {
 	"Sales Invoice": {
-        "on_submit": "titan_digitax.titan_digitax.utils.sales_invoice.on_submit"
+        "on_submit": "titan_digitax.titan_digitax.utils.sales_invoice.on_submit",
+        "on_cancel": "titan_digitax.titan_digitax.utils.sales_invoice.on_cancel"
     }
 }
 
