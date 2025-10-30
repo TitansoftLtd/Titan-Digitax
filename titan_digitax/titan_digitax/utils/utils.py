@@ -12,3 +12,14 @@ def get_digitax_credentials():
         frappe.msgprint("Error fetching Digitax credentials. Check error log for details.")
         frappe.log_error(f"Error fetching Digitax credentials: {str(e)}", "Digitax Utils")
         return None, None
+    
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def digitax_callback_sales_with_items():
+    # TODO: Implement handling of callback from Digitax with items
+    pass
+
+
+def get_digitax_callback_url_for_sales_with_items():
+    site_url = frappe.utils.get_url()
+    callback_path = "/api/method/titan_digitax.titan_digitax.utils.utils.digitax_callback_sales_with_items"
+    return f"{site_url}{callback_path}"

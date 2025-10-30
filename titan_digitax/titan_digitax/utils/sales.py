@@ -1,7 +1,7 @@
 import frappe
 import json
 import requests
-from .utils import get_digitax_credentials
+from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
 
 # useful for other scenarios, when we need to append items to payload
 def append_invoice_items_to_payload(doc, payload, is_return):
@@ -69,7 +69,8 @@ def send_sales_invoice_to_digitax(docname):
     payload = {
         "trader_invoice_number": str(doc.name),
         "items": [],
-        "invoice_status_code": "02" if doc.docstatus == 1 else "04"
+        "invoice_status_code": "02" if doc.docstatus == 1 else "04",
+        "callback_url": get_digitax_callback_url_for_sales_with_items(),
     }
 
     if not doc.is_return:
