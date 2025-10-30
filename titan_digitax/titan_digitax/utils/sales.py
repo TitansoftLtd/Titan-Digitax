@@ -51,6 +51,11 @@ def send_sales_invoice_to_digitax(docname):
 
     doc = frappe.get_doc("Sales Invoice", docname)
 
+    # Increment retry count if this is a retry (error message exists)
+    if doc.custom_error_message:
+        current_retry_count = doc.custom_retry_count or 0
+        frappe.db.set_value("Sales Invoice", doc.name, "custom_retry_count", current_retry_count + 1)
+
     digitax_base_url, digitax_api_key = get_digitax_credentials()
     headers = {
         "accept": "application/json",
@@ -141,3 +146,33 @@ def send_sales_invoice_to_digitax(docname):
     finally:
         frappe.db.commit()
         return response_data
+
+@frappe.whitelist()
+def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from_date=None, to_date=None, retry_count=5):
+    valid_companies = frappe.get_all("Company", filters={ "country": "Kenya", "custom_enable_company": 1 }, pluck="name")
+    filters = {
+        "docstatus": 1,
+        "custom_sent_to_digitax": 0,
+        "company": ["in", valid_companies],
+        "custom_sent_to_digitax": 0,
+        "custom_retry_count": ["<", retry_count],
+    }
+    if invoice_name:
+        filters["name"] = invoice_name
+    if from_date and to_date:
+        filters["posting_date"] = ["between", [from_date, to_date]]
+    if company:
+        filters["company"] = company
+    
+    invoices = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
+
+    for invoice in invoices:
+        send_sales_invoice_to_digitax(invoice)
+
+@frappe.whitelist()
+def job_retry_sending_sales_invoices():
+    frappe.enqueue(
+        retry_sending_sales_invoice_to_digitax,
+        queue="default",
+        timeout=600,
+    )
