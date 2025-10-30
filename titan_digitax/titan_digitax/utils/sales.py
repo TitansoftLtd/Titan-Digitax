@@ -46,7 +46,11 @@ def append_invoice_items_to_payload(doc, payload, is_return):
 
             payload["items"].append(new_item)
 
-def send_sales_invoice_to_digitax(doc):
+@frappe.whitelist()
+def send_sales_invoice_to_digitax(docname):
+
+    doc = frappe.get_doc("Sales Invoice", docname)
+
     digitax_base_url, digitax_api_key = get_digitax_credentials()
     headers = {
         "accept": "application/json",
@@ -94,25 +98,6 @@ def send_sales_invoice_to_digitax(doc):
 
     payload = json.dumps(payload)
 
-    # clear fields before sending (credit note scenario)
-    frappe.db.set_value(
-        "Sales Invoice",
-        doc.name,
-        {
-            "custom_offline_url": "",
-            "custom_sale_detail_url": "",
-            "custom_serial_number": "",
-            "custom_invoice_number": "",
-            "custom_digitax_status": "",
-            "custom_sale_id": "",
-            "custom_date": "",
-            "custom_time": "",
-            "custom_receipt_type_code": "",
-            "custom_original_sale_id": "",
-            "custom_error_message": "",
-        },
-    )
-
     try:
         response = requests.post(url, headers=headers, data=payload)
         response_data = response.json()
@@ -131,6 +116,7 @@ def send_sales_invoice_to_digitax(doc):
                     "custom_time": response_data.get("time", ""),
                     "custom_receipt_type_code": response_data.get("receipt_type_code", ""),
                     "custom_original_sale_id": response_data.get("original_sale_id", ""),
+                    "custom_sent_to_digitax": 1,
                 },
             )
         else:
@@ -141,17 +127,17 @@ def send_sales_invoice_to_digitax(doc):
                 response_data.get("message", "Unknown error"),
             )
         response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        error_message = f"Network/Connection Error: {str(e)}"
+    except Exception as e:
         frappe.db.set_value(
             "Sales Invoice",
             doc.name,
             "custom_error_message",
-            error_message,
+            str(response_data),
         )
         frappe.log_error(
-            message=f"Error while sending Sales Invoice {doc.name} to Digitax: {error_message}",
+            message=f"Error while sending Sales Invoice {doc.name} to Digitax: {str(response_data)}",
             title="Digitax Sales Invoice Sync Error",
         )
     finally:
         frappe.db.commit()
+        return response_data
