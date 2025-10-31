@@ -85,20 +85,20 @@ def send_sales_invoice_to_digitax(docname):
 
     # append_invoice_items_to_payload(doc, payload, doc.is_return)
 
-    # Breaburn specific: Add Tuition Fee as a single item
+    # Breaburn specific: Add School Fees as a single item
     new_item = {
-        "item_bar_code": "TUITION_FEE",
+        "item_bar_code": "SCHOOL_FEES",
         "quantity": 1,
         "unit_price": abs(doc.grand_total) if doc.grand_total > 0 else 0,
         "total_amount": abs(doc.grand_total) if doc.grand_total > 0 else 0,
         "package_unit_quantity": abs(doc.grand_total) if doc.grand_total > 0 else 0,
         "discount_rate": 0,
         "discount_amount": 0,
-        "item_description": "Tuiton Fee",
+        "item_description": "School Fees",
     }
 
     if not doc.is_return:
-        new_item["item_name"] = "Tuition Fee"
+        new_item["item_name"] = "School Fees"
         new_item["item_class_code"] = "99020000"
         new_item["item_tax_type_code"] = "D"
         new_item["is_stockable"] = False
