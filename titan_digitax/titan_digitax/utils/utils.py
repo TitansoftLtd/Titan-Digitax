@@ -1,4 +1,5 @@
 import frappe
+import json
 from frappe.utils.password import get_decrypted_password
 
 def get_digitax_credentials():
@@ -15,8 +16,27 @@ def get_digitax_credentials():
     
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def digitax_callback_sales_with_items():
-    # TODO: Implement handling of callback from Digitax with items
-    pass
+    try:
+        # Get the request data
+        if frappe.request.content_type == "application/json":
+            data = frappe.request.get_json()
+        else:
+            data = frappe.form_dict
+
+        # Log the received data for debugging
+        frappe.log_error(
+            title="Digitax Callback Received",
+            message=json.dumps(data, indent=2)
+        )
+    except Exception as e:
+        frappe.log_error(
+            title="Digitax Callback Error",
+            message=frappe.get_traceback()
+        )
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 
 
 def get_digitax_callback_url_for_sales_with_items():
