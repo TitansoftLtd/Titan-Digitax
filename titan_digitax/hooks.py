@@ -43,7 +43,9 @@ app_license = "gpl-3.0"
 # page_js = {"page" : "public/js/file.js"}
 
 # include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
+doctype_js = {
+    "Sales Invoice" : "public/js/sales_invoice.js"
+}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -146,23 +148,28 @@ doc_events = {
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"titan_digitax.tasks.all"
-# 	],
-# 	"daily": [
-# 		"titan_digitax.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"titan_digitax.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"titan_digitax.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"titan_digitax.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+    "cron": {
+        "*/15 * * * *": [
+            "titan_digitax.titan_digitax.utils.sales.job_retry_sending_sales_invoices"
+        ]
+    }
+	# "all": [
+	# 	"titan_digitax.tasks.all"
+	# ],
+	# "daily": [
+	# 	"titan_digitax.tasks.daily"
+	# ],
+	# "hourly": [
+	# 	"titan_digitax.tasks.hourly"
+	# ],
+	# "weekly": [
+	# 	"titan_digitax.tasks.weekly"
+	# ],
+	# "monthly": [
+	# 	"titan_digitax.tasks.monthly"
+	# ],
+}
 
 # Testing
 # -------
