@@ -24,10 +24,36 @@ def digitax_callback_sales_with_items():
             data = frappe.form_dict
 
         # Log the received data for debugging
-        frappe.log_error(
-            title="Digitax Callback Received",
-            message=json.dumps(data, indent=2)
-        )
+        # frappe.log_error(
+        #     title="Digitax Callback Received",
+        #     message=json.dumps(data, indent=2)
+        # )
+
+        data = data.get("data", {})
+
+        sale_id = data.get("id")
+        trader_invoice_number = data.get("trader_invoice_number")
+        status = data.get("status", "")
+        etims_url = data.get("etims_url", "")
+
+        if not trader_invoice_number or not sale_id:
+            frappe.log_error(
+                title="Digitax Callback Error",
+                message="Missing trader_invoice_number or sale_id in callback data"
+            )
+            return {
+                "status": "error",
+                "message": "Missing trader_invoice_number or sale_id"
+            }
+        
+        doc = frappe.get_doc("Sales Invoice", trader_invoice_number)
+        doc.custom_digitax_status = status
+        doc.custom_etims_url = etims_url
+        doc.custom_sale_id = sale_id
+        doc.add_comment("Comment", f"Digitax Callback received. Status: {status}, ETIMS URL: {etims_url}")
+        doc.save(ignore_permissions=True)
+        frappe.db.commit()
+
     except Exception as e:
         frappe.log_error(
             title="Digitax Callback Error",
