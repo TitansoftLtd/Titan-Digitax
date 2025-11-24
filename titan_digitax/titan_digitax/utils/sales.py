@@ -53,6 +53,9 @@ def send_sales_invoice_to_digitax(docname):
 
     if not frappe.db.get_value("Company", doc.company, "country") == "Kenya":
         return
+    
+    if not frappe.db.get_value("Company", doc.company, "custom_enable_company"):
+        return
 
     # Increment retry count if this is a retry (error message exists)
     if doc.custom_error_message:
