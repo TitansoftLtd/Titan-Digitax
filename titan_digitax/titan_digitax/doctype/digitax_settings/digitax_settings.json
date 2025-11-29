@@ -40,15 +40,14 @@
    "default": "0",
    "fieldname": "enable",
    "fieldtype": "Check",
-   "label": "Enable",
-   "read_only": 1
+   "label": "Enable"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-11-29 07:58:32.265505",
+ "modified": "2025-11-29 08:00:36.412259",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Settings",
