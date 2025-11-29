@@ -56,6 +56,20 @@ def send_sales_invoice_to_digitax(docname):
     
     if not frappe.db.get_value("Company", doc.company, "custom_enable_company"):
         return
+    
+    # Check if Digitax integration is enabled in Digitax Settings
+    try:
+        digitax_settings = frappe.get_single("Digitax Settings")
+        
+        # If not enabled, skip silently (no error log, no processing)
+        if not digitax_settings.get("enable"):
+            frappe.logger().info(f"Digitax integration disabled - skipping {doc.name}")
+            return
+            
+    except Exception as e:
+        # If Digitax Settings doesn't exist or can't be accessed, skip silently
+        frappe.logger().warning(f"Could not access Digitax Settings: {str(e)}")
+        return
 
     # Increment retry count if this is a retry (error message exists)
     if doc.custom_error_message:

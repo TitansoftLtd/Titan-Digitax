@@ -7,8 +7,9 @@
  "field_order": [
   "digitax_authentication_section",
   "base_url",
+  "api_key",
   "column_break_wknx",
-  "api_key"
+  "enable"
  ],
  "fields": [
   {
@@ -34,13 +35,19 @@
    "in_list_view": 1,
    "label": "API Key",
    "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "enable",
+   "fieldtype": "Check",
+   "label": "Enable"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-10-22 19:47:01.688254",
+ "modified": "2025-11-29 08:00:36.412259",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Settings",
