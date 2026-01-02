@@ -48,7 +48,6 @@ def append_invoice_items_to_payload(doc, payload, is_return):
 
 @frappe.whitelist()
 def send_sales_invoice_to_digitax(docname):
-
     doc = frappe.get_doc("Sales Invoice", docname)
 
     if not frappe.db.get_value("Company", doc.company, "country") == "Kenya":
@@ -74,7 +73,7 @@ def send_sales_invoice_to_digitax(docname):
     # Increment retry count if this is a retry (error message exists)
     if doc.custom_error_message:
         current_retry_count = doc.custom_retry_count or 0
-        frappe.db.set_value("Sales Invoice", doc.name, "custom_retry_count", current_retry_count + 1)
+        frappe.db.set_value("Sales Invoice", doc.name, "custom_retry_count", current_retry_count + 1, update_modified=False)
 
     digitax_base_url, digitax_api_key = get_digitax_credentials()
     headers = {
@@ -103,12 +102,15 @@ def send_sales_invoice_to_digitax(docname):
     # append_invoice_items_to_payload(doc, payload, doc.is_return)
 
     # Breaburn specific: Add School Fees as a single item
+    # For credit notes, grand_total is negative, so we use abs() to get positive value
+    amount = abs(doc.grand_total)
+    
     new_item = {
         "item_bar_code": "SCHOOL_FEES",
         "quantity": 1,
-        "unit_price": abs(doc.grand_total) if doc.grand_total > 0 else 0,
-        "total_amount": abs(doc.grand_total) if doc.grand_total > 0 else 0,
-        "package_unit_quantity": abs(doc.grand_total) if doc.grand_total > 0 else 0,
+        "unit_price": amount,
+        "total_amount": amount,
+        "package_unit_quantity": amount,
         "discount_rate": 0,
         "discount_amount": 0,
         "item_description": "School Fees",
@@ -123,6 +125,7 @@ def send_sales_invoice_to_digitax(docname):
     payload["items"].append(new_item)
 
     payload = json.dumps(payload)
+
 
     try:
         response = requests.post(url, headers=headers, data=payload)
@@ -144,6 +147,7 @@ def send_sales_invoice_to_digitax(docname):
                     "custom_original_sale_id": response_data.get("original_sale_id", ""),
                     "custom_sent_to_digitax": 1,
                 },
+                update_modified=False
             )
         else:
             frappe.db.set_value(
@@ -151,6 +155,7 @@ def send_sales_invoice_to_digitax(docname):
                 doc.name,
                 "custom_error_message",
                 response_data.get("message", "Unknown error"),
+                update_modified=False
             )
         response.raise_for_status()
     except Exception as e:
@@ -159,6 +164,7 @@ def send_sales_invoice_to_digitax(docname):
             doc.name,
             "custom_error_message",
             str(response_data),
+            update_modified=False
         )
         frappe.log_error(
             message=f"Error while sending Sales Invoice {doc.name} to Digitax: {str(response_data)}",
