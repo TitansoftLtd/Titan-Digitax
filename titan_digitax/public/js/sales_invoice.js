@@ -57,5 +57,5 @@ const add_send_to_digitax_button = (frm) => {
 				});
 			},
 		});
-	});
+	}, __("Digitax Actions"));
 };
