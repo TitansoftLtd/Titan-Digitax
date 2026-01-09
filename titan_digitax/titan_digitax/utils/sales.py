@@ -107,8 +107,8 @@ def send_sales_invoice_to_digitax(docname):
                 "Original sale not found in Digitax. Cannot process credit note.",
                 update_modified=False
             )
-            frappe.msgprint(f"Original sale not found in Digitax. Cannot process credit note for {doc.name}.")
             frappe.db.commit()
+            frappe.msgprint(f"Original sale not found in Digitax. Cannot process credit note for {doc.name}.")
             return
 
     # append_invoice_items_to_payload(doc, payload, doc.is_return)
