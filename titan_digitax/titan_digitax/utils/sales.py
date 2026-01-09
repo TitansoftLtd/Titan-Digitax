@@ -99,6 +99,18 @@ def send_sales_invoice_to_digitax(docname):
         payload["return_date"] = str(doc.posting_date)
         payload["sale_id"] = frappe.db.get_value("Sales Invoice", doc.return_against, "custom_sale_id")
 
+        if not payload["sale_id"]:
+            frappe.db.set_value(
+                "Sales Invoice",
+                doc.name,
+                "custom_error_message",
+                "Original sale not found in Digitax. Cannot process credit note.",
+                update_modified=False
+            )
+            frappe.db.commit()
+            frappe.msgprint(f"Original sale not found in Digitax. Cannot process credit note for {doc.name}.")
+            return
+
     # append_invoice_items_to_payload(doc, payload, doc.is_return)
 
     # Breaburn specific: Add School Fees as a single item
