@@ -86,8 +86,12 @@ def send_sales_invoice_to_digitax(docname):
         "trader_invoice_number": str(doc.name),
         "items": [],
         "invoice_status_code": "02" if doc.docstatus == 1 else "04",
+        "customer_name": str(doc.customer_name),
         "callback_url": get_digitax_callback_url_for_sales_with_items(),
     }
+
+    if str(doc.tax_id):
+        payload["customer_tin"] = str(doc.tax_id)
 
     if not doc.is_return:
         url = f"{digitax_base_url.rstrip('/')}/sales-with-items"
