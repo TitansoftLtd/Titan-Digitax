@@ -48,6 +48,9 @@ def append_invoice_items_to_payload(doc, payload, is_return):
 
 @frappe.whitelist()
 def send_sales_invoice_to_digitax(docname):
+    if not frappe.conf.get("sync_with_digitax"):
+        return
+    
     doc = frappe.get_doc("Sales Invoice", docname)
 
     if not frappe.db.get_value("Company", doc.company, "country") == "Kenya":
@@ -214,6 +217,9 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
 
 @frappe.whitelist()
 def job_retry_sending_sales_invoices():
+    if not frappe.conf.get("sync_with_digitax"):
+        return
+    
     frappe.enqueue(
         retry_sending_sales_invoice_to_digitax,
         queue="default",
