@@ -8,7 +8,7 @@ frappe.ui.form.on("Sales Invoice", {
 });
 
 const add_send_to_digitax_button = (frm) => {
-	frm.add_custom_button(__("Send to Digitax"), function () {		
+	frm.add_custom_button(__("Send to Digitax"), function () {
 		frappe.call({
 			method: "titan_digitax.titan_digitax.utils.sales.send_sales_invoice_to_digitax",
 			args: {
@@ -87,15 +87,15 @@ const add_send_to_digitax_button = (frm) => {
 								indicator: "green",
 							});
 						} else {
-							frappe.msgprint({
-								title: __("Success"),
+						frappe.msgprint({
+							title: __("Success"),
 								message: __("Sales Invoice sent to Digitax successfully!<br><br>Sale ID: {0}<br>Status: {1}", [
 									r.message.id,
 									r.message.status,
 								]),
-								indicator: "green",
-							});
-						}
+							indicator: "green",
+						});
+					}
 						frm.reload_doc();
 						return;
 					}
