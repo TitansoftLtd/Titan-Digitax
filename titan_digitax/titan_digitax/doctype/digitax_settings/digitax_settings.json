@@ -9,7 +9,27 @@
   "base_url",
   "api_key",
   "column_break_wknx",
-  "enable"
+  "target_country",
+  "enable",
+  "api_request_timeout",
+  "max_retry_attempts",
+  "background_job_timeout",
+  "default_item_settings_section",
+  "default_item_class_code",
+  "column_break_items",
+  "default_item_tax_type_code",
+  "school_fees_item_section",
+  "default_item_bar_code",
+  "default_item_name",
+  "column_break_school_fees",
+  "default_item_description",
+  "default_is_stockable",
+  "invoice_status_codes_section",
+  "submitted_invoice_status_code",
+  "default_receipt_type_code",
+  "column_break_status",
+  "cancelled_invoice_status_code",
+  "default_payment_type_code"
  ],
  "fields": [
   {
@@ -41,13 +61,140 @@
    "fieldname": "enable",
    "fieldtype": "Check",
    "label": "Enable"
+  },
+  {
+   "default": "Kenya",
+   "description": "Only send invoices from companies in this country to Digitax",
+   "fieldname": "target_country",
+   "fieldtype": "Link",
+   "label": "Target Country",
+   "options": "Country"
+  },
+  {
+   "default": "30",
+   "description": "Timeout for API requests in seconds (default: 30)",
+   "fieldname": "api_request_timeout",
+   "fieldtype": "Int",
+   "label": "API Request Timeout (seconds)"
+  },
+  {
+   "default": "5",
+   "description": "Maximum number of retry attempts for failed invoices (default: 5)",
+   "fieldname": "max_retry_attempts",
+   "fieldtype": "Int",
+   "label": "Max Retry Attempts"
+  },
+  {
+   "default": "600",
+   "description": "Timeout for background retry jobs in seconds (default: 600 = 10 minutes)",
+   "fieldname": "background_job_timeout",
+   "fieldtype": "Int",
+   "label": "Background Job Timeout (seconds)"
+  },
+  {
+   "fieldname": "invoice_status_codes_section",
+   "fieldtype": "Section Break",
+   "label": "Invoice Status Codes"
+  },
+  {
+   "default": "02",
+   "description": "Status code for submitted invoices (default: 02)",
+   "fieldname": "submitted_invoice_status_code",
+   "fieldtype": "Data",
+   "label": "Submitted Invoice Status Code"
+  },
+  {
+   "default": "S",
+   "description": "Receipt type code for sales invoices (default: S)",
+   "fieldname": "default_receipt_type_code",
+   "fieldtype": "Data",
+   "label": "Default Receipt Type Code"
+  },
+  {
+   "fieldname": "column_break_status",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "04",
+   "description": "Status code for cancelled/draft invoices (default: 04)",
+   "fieldname": "cancelled_invoice_status_code",
+   "fieldtype": "Data",
+   "label": "Cancelled Invoice Status Code"
+  },
+  {
+   "default": "01",
+   "description": "Payment type code for invoices (default: 01 = Cash)",
+   "fieldname": "default_payment_type_code",
+   "fieldtype": "Data",
+   "label": "Default Payment Type Code"
+  },
+  {
+   "fieldname": "default_item_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Default Item Settings"
+  },
+  {
+   "default": "99020000",
+   "description": "Fallback item class code when not specified on item (default: 99020000)",
+   "fieldname": "default_item_class_code",
+   "fieldtype": "Data",
+   "label": "Default Item Class Code"
+  },
+  {
+   "fieldname": "column_break_items",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "D",
+   "description": "Fallback tax type code when not specified on item (default: D)",
+   "fieldname": "default_item_tax_type_code",
+   "fieldtype": "Select",
+   "label": "Default Item Tax Type Code",
+   "options": "\nA\nB\nC\nD\nE"
+  },
+  {
+   "fieldname": "school_fees_item_section",
+   "fieldtype": "Section Break",
+   "label": "School Fees Item Details"
+  },
+  {
+   "default": "SCHOOL_FEES",
+   "description": "Default item bar code for school fees (default: SCHOOL_FEES)",
+   "fieldname": "default_item_bar_code",
+   "fieldtype": "Data",
+   "label": "Default Item Bar Code"
+  },
+  {
+   "default": "School Fees",
+   "description": "Default item name for school fees (default: School Fees)",
+   "fieldname": "default_item_name",
+   "fieldtype": "Data",
+   "label": "Default Item Name"
+  },
+  {
+   "fieldname": "column_break_school_fees",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "School Fees",
+   "description": "Default item description for school fees (default: School Fees)",
+   "fieldname": "default_item_description",
+   "fieldtype": "Data",
+   "label": "Default Item Description"
+  },
+  {
+   "default": "0",
+   "description": "Whether the default item is stockable (default: No)",
+   "fieldname": "default_is_stockable",
+   "fieldtype": "Check",
+   "label": "Default Is Stockable"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2025-11-29 08:00:36.412259",
+ "modified": "2026-01-25 16:59:53.529077",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Settings",
