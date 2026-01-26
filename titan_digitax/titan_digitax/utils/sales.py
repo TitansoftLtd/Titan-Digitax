@@ -86,7 +86,7 @@ def send_sales_invoice_to_digitax(docname):
     }
     url = ""
     payload = {
-        "trader_invoice_number": str(doc.name),
+        "trader_invoice_number": str(doc.custom_trader_invoice_number) or str(doc.name),
         "items": [],
         "invoice_status_code": "02" if doc.docstatus == 1 else "04",
         "customer_name": str(doc.customer_name),
