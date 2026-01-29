@@ -17,11 +17,8 @@ const add_send_to_digitax_button = (frm) => {
 			freeze: true,
 			freeze_message: __("Sending Sales Invoice to Digitax..."),
 			callback: function (r) {
-				console.log("=== DIGITAX: Response received:", r);
-				
 				// Python exception occurred
 				if (r.exc) {
-					console.error("=== DIGITAX: Python exception occurred:", r.exc);
 					frappe.msgprint({
 						title: __("Error sending to Digitax"),
 						message: __("Error sending to Digitax. Check error log and digitax_integration.log file."),
@@ -33,8 +30,6 @@ const add_send_to_digitax_button = (frm) => {
 
 				// Check if message exists and has the expected structure
 				if (r.message) {
-					console.log("=== DIGITAX: Message object:", r.message);
-					
 					// Check if request was skipped
 					if (r.message.skipped) {
 						frappe.msgprint({
@@ -101,14 +96,12 @@ const add_send_to_digitax_button = (frm) => {
 					}
 					
 					// Unknown response format
-					console.warn("=== DIGITAX: Unknown response format:", r.message);
 					frappe.msgprint({
 						title: __("Unknown Response"),
 						message: __("Received unexpected response from Digitax. Check digitax_integration.log for details."),
 						indicator: "orange",
 					});
 				} else {
-					console.warn("=== DIGITAX: No message in response");
 					frappe.msgprint({
 						title: __("No Response"),
 						message: __("No response received from Digitax. Check digitax_integration.log for details."),
@@ -119,7 +112,6 @@ const add_send_to_digitax_button = (frm) => {
 				frm.reload_doc();
 			},
 			error: function (r) {
-				console.error("=== DIGITAX: AJAX error:", r);
 				// This catches network errors or server errors
 				frappe.msgprint({
 					title: __("Connection Error"),

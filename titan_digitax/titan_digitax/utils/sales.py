@@ -64,7 +64,18 @@ def send_sales_invoice_to_digitax(docname):
             "message": "To enable, set 'sync_with_digitax: true' in common_site_config.json"
         }
     
-    doc = frappe.get_doc("Sales Invoice", docname)
+    # Check cache for in-progress sends to prevent concurrent calls (prevents duplicate sends)
+    cache_key = f"digitax_sending_{docname}"
+    if frappe.cache().get(cache_key):
+        return {
+            "skipped": True,
+            "reason": "send_in_progress",
+            "message": "Another send is already in progress for this invoice"
+        }
+    
+    # Set cache flag for 120 seconds (protects against race conditions)
+    frappe.cache().set(cache_key, "1", expires_in_sec=120)
+    
     # Create a dedicated logger for Digitax operations
     logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
     
@@ -108,6 +119,23 @@ def send_sales_invoice_to_digitax(docname):
         logger.info(f"Skipping: Company Digitax integration not enabled")
         return {"skipped": True, "reason": "Company Digitax integration disabled"}
 
+    # Check if invoice was already successfully sent to Digitax (use database to avoid stale data)
+    sent_to_digitax, error_message, sale_id, digitax_status = frappe.db.get_value(
+        "Sales Invoice",
+        doc.name,
+        ["custom_sent_to_digitax", "custom_error_message", "custom_sale_id", "custom_digitax_status"]
+    ) or (0, None, None, None)
+    
+    if sent_to_digitax and not error_message:
+        logger.info(f"Invoice already sent to Digitax successfully (Sale ID: {sale_id})")
+        return {
+            "skipped": True,
+            "reason": "already_sent",
+            "message": "Invoice was already sent to Digitax successfully",
+            "id": sale_id,
+            "status": digitax_status or "Sent"
+        }
+
     # Increment retry count if this is a retry (error message exists)
     if doc.custom_error_message:
         current_retry_count = doc.custom_retry_count or 0
@@ -149,7 +177,7 @@ def send_sales_invoice_to_digitax(docname):
         payload["customer_tin"] = str(doc.tax_id)
 
     if not doc.is_return:
-        url = f"{digitax_base_url.rstrip('/')}/sales-with-items"
+        url = f"{digitax_base_url.rstrip('/')}/sales"
         payload["sale_date"] = str(doc.posting_date)
         payload["receipt_type_code"] = digitax_settings.get("default_receipt_type_code") or "S"
         payload["payment_type_code"] = digitax_settings.get("default_payment_type_code") or "01"
@@ -174,33 +202,57 @@ def send_sales_invoice_to_digitax(docname):
 
     # append_invoice_items_to_payload(doc, payload, doc.is_return)
 
-    # Breaburn specific: Add School Fees as a single item
+    # Add School Fees as a single item using Digitax item ID
     # For credit notes, grand_total is negative, so we use abs() to get positive value
     amount = abs(doc.grand_total)
     logger.info(f"Calculated amount: {amount} (Original grand_total: {doc.grand_total})")
     
-    # Get item details from settings
-    item_bar_code = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
-    item_name = digitax_settings.get("default_item_name") or "School Fees"
+    # Get item code from settings to look up Digitax ID
+    default_item_code = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
     item_description = digitax_settings.get("default_item_description") or "School Fees"
     
+    logger.info(f"Looking up Digitax ID for item: {default_item_code}")
+    
+    # Get Digitax item ID from Item master
+    digitax_item_id = frappe.db.get_value("Item", default_item_code, "custom_digitax_id")
+    
+    if not digitax_item_id:
+        # Item has no Digitax ID - cannot send to Digitax
+        error_msg = f"Item '{default_item_code}' has no Digitax ID. Please sync items from Digitax first."
+        logger.error(f"SKIP INVOICE: {error_msg}")
+        
+        frappe.db.set_value(
+            "Sales Invoice",
+            doc.name,
+            "custom_error_message",
+            error_msg,
+            update_modified=False
+        )
+        
+        frappe.log_error(
+            message=f"Cannot send Sales Invoice {doc.name} to Digitax: {error_msg}",
+            title="Digitax - Missing Item ID"
+        )
+        
+        return {
+            "skipped": True,
+            "reason": "missing_digitax_item_id",
+            "message": error_msg
+        }
+    
+    logger.info(f"Found Digitax item ID: {digitax_item_id}")
+    
+    # Build item payload using Digitax item ID
     new_item = {
-        "item_bar_code": item_bar_code,
+        "id": digitax_item_id,
         "quantity": 1,
         "unit_price": amount,
         "total_amount": amount,
-        "package_unit_quantity": amount,
+        "package_unit_quantity": 1,
         "discount_rate": 0,
         "discount_amount": 0,
         "item_description": item_description,
     }
-
-    if not doc.is_return:
-        new_item["item_name"] = item_name
-        # Use default values from Digitax Settings
-        new_item["item_class_code"] = digitax_settings.get("default_item_class_code") or "99020000"
-        new_item["item_tax_type_code"] = digitax_settings.get("default_item_tax_type_code") or "D"
-        new_item["is_stockable"] = bool(digitax_settings.get("default_is_stockable"))
 
     payload["items"].append(new_item)
     logger.info(f"Item added to payload: {new_item}")
@@ -241,10 +293,12 @@ def send_sales_invoice_to_digitax(docname):
                     "custom_receipt_type_code": response_data.get("receipt_type_code", ""),
                     "custom_original_sale_id": response_data.get("original_sale_id", ""),
                     "custom_sent_to_digitax": 1,
+                    "custom_error_message": "",  # Clear any previous errors
                 },
                 update_modified=False
             )
-            logger.info(f"Invoice fields updated in ERPNext")
+            frappe.db.commit()  # Commit immediately to prevent duplicate sends
+            logger.info(f"Invoice fields updated and committed in ERPNext")
         elif response.status_code == 409:
             # 409 Conflict - Check if it's a duplicate trader_invoice_number
             error_message = response_data.get("message", "").lower()
@@ -279,20 +333,58 @@ def send_sales_invoice_to_digitax(docname):
                 logger.info(f"Error message saved to invoice")
         else:
             error_msg = response_data.get("message", "Unknown error")
-            logger.error(f"API ERROR: Status {response.status_code}, Message: {error_msg}")
             
-            frappe.db.set_value(
+            # Special handling for 400 Bad Request
+            should_raise = True  # Flag to control whether to raise exception
+            if response.status_code == 400:
+                logger.error(f"400 BAD REQUEST: {error_msg}")
+                logger.error(f"Request payload may have invalid data or duplicate item IDs")
+                
+                # Check if invoice already has Digitax data (use database to avoid stale data)
+                existing_sale_id, existing_sent = frappe.db.get_value(
+                    "Sales Invoice",
+                    doc.name,
+                    ["custom_sale_id", "custom_sent_to_digitax"]
+                ) or (None, 0)
+                
+                if existing_sale_id and existing_sent:
+                    logger.warning(
+                        f"Invoice {doc.name} already has Digitax data (Sale ID: {existing_sale_id}). "
+                        f"This 400 error is likely a duplicate submission attempt. Ignoring error."
+                    )
+                    # Don't overwrite existing successful sync, don't log error
+                    should_raise = False
+                    return {
+                        "skipped": True,
+                        "reason": "already_sent_400_ignored",
+                        "message": f"Invoice already synced (Sale ID: {existing_sale_id}). 400 error ignored.",
+                        "id": existing_sale_id
+                    }
+            else:
+                logger.error(f"API ERROR: Status {response.status_code}, Message: {error_msg}")
+            
+            # Only save error message if we're going to raise the exception
+            if should_raise:
+                frappe.db.set_value(
+                    "Sales Invoice",
+                    doc.name,
+                    "custom_error_message",
+                    error_msg,
+                    update_modified=False
+                )
+                logger.info(f"Error message saved to invoice")
+        
+        # Only raise for status codes that are actual errors (not 409 or handled 400s)
+        if response.status_code >= 400 and response.status_code != 409:
+            # Don't raise if we handled it specially above (check database for current state)
+            existing_sale_id, existing_sent = frappe.db.get_value(
                 "Sales Invoice",
                 doc.name,
-                "custom_error_message",
-                error_msg,
-                update_modified=False
-            )
-            logger.info(f"Error message saved to invoice")
-        
-        # Only raise for status codes that are actual errors (not 409 which we treat as success)
-        if response.status_code >= 400 and response.status_code != 409:
-            response.raise_for_status()
+                ["custom_sale_id", "custom_sent_to_digitax"]
+            ) or (None, 0)
+            
+            if not (response.status_code == 400 and existing_sale_id and existing_sent):
+                response.raise_for_status()
         
         logger.info(f"Request completed successfully")
         
@@ -313,20 +405,43 @@ def send_sales_invoice_to_digitax(docname):
         )
         
     except requests.exceptions.RequestException as e:
-        logger.error(f"REQUEST ERROR: {str(e)}")
-        error_msg = f"Request failed: {str(e)}"
-        frappe.db.set_value(
-            "Sales Invoice",
-            doc.name,
-            "custom_error_message",
-            error_msg,
-            update_modified=False
-        )
-        response_data = {"error": "request_failed", "message": error_msg}
-        frappe.log_error(
-            message=f"Request error while sending Sales Invoice {doc.name} to Digitax: {str(e)}",
-            title="Digitax Request Error",
-        )
+        # Check if this is a 400 error for an already-sent invoice (don't log)
+        is_400_already_sent = False
+        if hasattr(e, 'response') and e.response is not None:
+            if e.response.status_code == 400:
+                existing_sale_id, existing_sent = frappe.db.get_value(
+                    "Sales Invoice",
+                    doc.name,
+                    ["custom_sale_id", "custom_sent_to_digitax"]
+                ) or (None, 0)
+                
+                if existing_sale_id and existing_sent:
+                    is_400_already_sent = True
+                    logger.warning(
+                        f"400 error for already-sent invoice {doc.name} (Sale ID: {existing_sale_id}). "
+                        f"Ignoring error - invoice was already successfully synced."
+                    )
+                    response_data = {
+                        "skipped": True,
+                        "reason": "already_sent_400_ignored",
+                        "id": existing_sale_id
+                    }
+        
+        if not is_400_already_sent:
+            logger.error(f"REQUEST ERROR: {str(e)}")
+            error_msg = f"Request failed: {str(e)}"
+            frappe.db.set_value(
+                "Sales Invoice",
+                doc.name,
+                "custom_error_message",
+                error_msg,
+                update_modified=False
+            )
+            response_data = {"error": "request_failed", "message": error_msg}
+            frappe.log_error(
+                message=f"Request error while sending Sales Invoice {doc.name} to Digitax: {str(e)}",
+                title="Digitax Request Error",
+            )
         
     except Exception as e:
         logger.error(f"UNEXPECTED ERROR: {str(e)}")
@@ -349,6 +464,10 @@ def send_sales_invoice_to_digitax(docname):
             title="Digitax Sales Invoice Sync Error",
         )
     finally:
+        # Clear the cache flag to allow future sends
+        cache_key = f"digitax_sending_{docname}"
+        frappe.cache().delete(cache_key)
+        
         frappe.db.commit()
         logger.info(f"=" * 80)
         logger.info(f"DIGITAX SEND: Process completed for {docname}")
