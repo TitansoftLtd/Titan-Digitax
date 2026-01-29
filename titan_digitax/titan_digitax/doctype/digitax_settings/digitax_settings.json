@@ -11,6 +11,7 @@
   "column_break_wknx",
   "target_country",
   "enable",
+  "callback_url",
   "api_request_timeout",
   "max_retry_attempts",
   "background_job_timeout",
@@ -61,6 +62,13 @@
    "fieldname": "enable",
    "fieldtype": "Check",
    "label": "Enable"
+  },
+  {
+   "description": "Public HTTPS callback URL for Digitax (leave blank to omit callback)",
+   "fieldname": "callback_url",
+   "fieldtype": "Data",
+   "label": "Callback URL",
+   "options": "URL"
   },
   {
    "default": "Kenya",

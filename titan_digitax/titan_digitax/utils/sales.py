@@ -1,7 +1,7 @@
 import frappe
 import json
 import requests
-from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
+from .utils import get_digitax_credentials
 
 
 # useful for other scenarios, when we need to append items to payload
@@ -74,7 +74,7 @@ def send_sales_invoice_to_digitax(docname):
         }
     
     # Set cache flag for 120 seconds (protects against race conditions)
-    frappe.cache().set(cache_key, "1", expires_in_sec=120)
+    frappe.cache().setex(cache_key, 120, "1")
     
     # Create a dedicated logger for Digitax operations
     logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
@@ -170,8 +170,19 @@ def send_sales_invoice_to_digitax(docname):
         "items": [],
         "invoice_status_code": submitted_status if doc.docstatus == 1 else cancelled_status,
         "customer_name": str(doc.customer_name),
-        "callback_url": get_digitax_callback_url_for_sales_with_items(),
     }
+    
+    # Only include callback_url if configured in settings
+    callback_url = digitax_settings.get("callback_url")
+    if callback_url and callback_url.strip():
+        # Validate that callback URL is HTTPS
+        if callback_url.startswith("https://"):
+            payload["callback_url"] = callback_url
+            logger.info(f"Using callback URL: {callback_url}")
+        else:
+            logger.warning(f"Callback URL is not HTTPS, skipping: {callback_url}")
+    else:
+        logger.info("No callback URL configured, skipping callback_url field")
 
     if str(doc.tax_id):
         payload["customer_tin"] = str(doc.tax_id)
@@ -407,13 +418,25 @@ def send_sales_invoice_to_digitax(docname):
     except requests.exceptions.RequestException as e:
         # Check if this is a 400 error for an already-sent invoice (don't log)
         is_400_already_sent = False
+        digitax_response_body = None
+        
         if hasattr(e, 'response') and e.response is not None:
+            # Try to get the response body for debugging
+            try:
+                digitax_response_body = e.response.json()
+                logger.error(f"Digitax 400 Response: {digitax_response_body}")
+            except:
+                digitax_response_body = e.response.text
+                logger.error(f"Digitax 400 Response (text): {digitax_response_body}")
+            
             if e.response.status_code == 400:
                 existing_sale_id, existing_sent = frappe.db.get_value(
                     "Sales Invoice",
                     doc.name,
                     ["custom_sale_id", "custom_sent_to_digitax"]
                 ) or (None, 0)
+                
+                logger.info(f"Checking if already sent: sale_id={existing_sale_id}, sent={existing_sent}")
                 
                 if existing_sale_id and existing_sent:
                     is_400_already_sent = True
@@ -430,16 +453,21 @@ def send_sales_invoice_to_digitax(docname):
         if not is_400_already_sent:
             logger.error(f"REQUEST ERROR: {str(e)}")
             error_msg = f"Request failed: {str(e)}"
+            
+            # Include Digitax response in error message if available
+            if digitax_response_body:
+                error_msg += f" | Digitax Response: {digitax_response_body}"
+            
             frappe.db.set_value(
                 "Sales Invoice",
                 doc.name,
                 "custom_error_message",
-                error_msg,
+                error_msg[:500],  # Limit length
                 update_modified=False
             )
             response_data = {"error": "request_failed", "message": error_msg}
             frappe.log_error(
-                message=f"Request error while sending Sales Invoice {doc.name} to Digitax: {str(e)}",
+                message=f"Request error while sending Sales Invoice {doc.name} to Digitax: {str(e)}\n\nDigitax Response: {digitax_response_body}",
                 title="Digitax Request Error",
             )
         
