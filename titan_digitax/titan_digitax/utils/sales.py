@@ -194,7 +194,7 @@ def send_sales_invoice_to_digitax(docname):
         payload["payment_type_code"] = digitax_settings.get("default_payment_type_code") or "01"
         logger.info(f"Invoice Type: Regular Sales Invoice")
     else:
-        url = f"{digitax_base_url.rstrip('/')}/credit-notes-with-barcode"
+        url = f"{digitax_base_url.rstrip('/')}/credit-notes"
         payload["return_date"] = str(doc.posting_date)
         payload["sale_id"] = frappe.db.get_value("Sales Invoice", doc.return_against, "custom_sale_id")
         logger.info(f"Invoice Type: Credit Note (Return against: {doc.return_against})")
@@ -234,20 +234,36 @@ def send_sales_invoice_to_digitax(docname):
         rate = item_row.rate  # Keep original sign
         amount = item_row.amount  # Keep original sign
         
-        # For credit notes, use abs() for all amounts
-        if doc.is_return:
-            rate = abs(rate)
-            amount = abs(amount)
-        
         discount_pct = item_row.discount_percentage or 0
         discount_amt = abs(item_row.discount_amount or 0)
         
-        logger.info(f"[Item {idx}] Code: {item_code}, Name: {item_name}, Qty: {quantity}, Rate: {rate}, Amount: {amount}")
+        # DISCOUNT DETECTION LOGIC (different for invoices vs credit notes)
+        is_discount = False
         
-        # Check if this is a discount item (negative amount)
-        if amount < 0:
-            discount_value = abs(amount)
-            logger.info(f"[Item {idx}] DISCOUNT ITEM detected: {item_name}, Discount Amount: {discount_value}")
+        if doc.is_return:
+            # For CREDIT NOTES: Calculate qty * rate BEFORE abs()
+            # Regular items are NEGATIVE, discount items are POSITIVE
+            calculated_amount = quantity * rate
+            
+            if calculated_amount > 0:
+                # Positive amount in credit note = discount
+                is_discount = True
+                discount_value = abs(calculated_amount)
+                logger.info(f"Discount detected in credit note: {item_name} = {discount_value}")
+            else:
+                # Negative amount = regular item, convert to positive for Digitax
+                quantity = abs(quantity)
+                rate = abs(rate)
+                amount = abs(amount)
+        else:
+            # For REGULAR INVOICES: Check if amount is negative
+            if amount < 0:
+                is_discount = True
+                discount_value = abs(amount)
+                logger.info(f"Discount detected in invoice: {item_name} = {discount_value}")
+        
+        # If this is a discount item, track it and skip adding to items_dict
+        if is_discount:
             discount_items.append({
                 "item_code": item_code,
                 "item_name": item_name,
@@ -261,7 +277,7 @@ def send_sales_invoice_to_digitax(docname):
         
         if not digitax_item_id:
             # Item has no Digitax ID - track as missing
-            logger.warning(f"[Item {idx}] Missing Digitax ID for item: {item_code} ({item_name})")
+            logger.warning(f"Missing Digitax ID for item: {item_code}")
             missing_items.append({
                 "item_code": item_code,
                 "item_name": item_name,
@@ -269,38 +285,39 @@ def send_sales_invoice_to_digitax(docname):
             })
             continue
         
-        logger.info(f"[Item {idx}] Found Digitax ID: {digitax_item_id}")
+        # Ensure values are positive (critical for credit notes)
+        if quantity < 0 or rate < 0 or amount < 0:
+            quantity = abs(quantity)
+            rate = abs(rate)
+            amount = abs(amount)
         
         # Combine duplicate items by Digitax ID
         if digitax_item_id in items_dict:
             # Item already exists - combine quantities and amounts
             existing = items_dict[digitax_item_id]
-            existing["quantity"] += quantity
-            existing["total_amount"] += amount
+            existing["quantity"] = abs(existing["quantity"] + quantity)  # Ensure positive
+            existing["total_amount"] = abs(existing["total_amount"] + amount)  # Ensure positive
             existing["discount_amount"] += discount_amt
             
-            # Recalculate average unit price
-            existing["unit_price"] = existing["total_amount"] / existing["quantity"]
+            # Recalculate average unit price (ensure positive)
+            existing["unit_price"] = abs(existing["total_amount"] / existing["quantity"]) if existing["quantity"] > 0 else 0
             
             # Use weighted average for discount rate
             total_before_discount = existing["total_amount"] + existing["discount_amount"]
             existing["discount_rate"] = (existing["discount_amount"] / total_before_discount * 100) if total_before_discount > 0 else 0
-            
-            logger.info(f"[Item {idx}] COMBINED with existing item. New totals - Qty: {existing['quantity']}, Amount: {existing['total_amount']}")
         else:
             # New item - add to dictionary
             items_dict[digitax_item_id] = {
                 "id": digitax_item_id,
-                "quantity": quantity,
-                "unit_price": rate,
-                "total_amount": amount,
+                "quantity": abs(quantity),  # Ensure positive
+                "unit_price": abs(rate),  # Ensure positive
+                "total_amount": abs(amount),  # Ensure positive
                 "package_unit_quantity": 1,
                 "discount_rate": discount_pct,
                 "discount_amount": discount_amt,
                 "item_description": item_name or item_code,
                 "item_code": item_code,  # Track original item code
             }
-            logger.info(f"[Item {idx}] Added new item to dictionary")
     
     # DISCOUNT HANDLING: Apply discounts to items (highest to lowest value)
     if discount_items:
@@ -406,9 +423,9 @@ def send_sales_invoice_to_digitax(docname):
                 remaining_discount = 0
                 logger.info(f"Applied {discount_to_apply} discount to '{item['description']}'. New amount: {new_amount}")
             
-            # Update item amounts
-            item_data["total_amount"] = new_amount
-            item_data["unit_price"] = new_amount / item_data["quantity"] if item_data["quantity"] > 0 else 0
+            # Update item amounts (ensure positive values)
+            item_data["total_amount"] = abs(new_amount)
+            item_data["unit_price"] = abs(new_amount / item_data["quantity"]) if item_data["quantity"] > 0 else 0
         
         logger.info(f"Successfully applied {total_discounts} in discounts across items. Remaining amount to send: {total_items_amount - total_discounts}")
     
@@ -419,11 +436,35 @@ def send_sales_invoice_to_digitax(docname):
             logger.info(f"Skipping item '{item_data['item_description']}' - fully discounted (amount: {item_data['total_amount']})")
             continue
         
+        # Skip items with unit_price less than 0.01 (Digitax requirement)
+        if item_data["unit_price"] < 0.01:
+            logger.warning(f"Skipping item '{item_data['item_description']}' - unit_price ({item_data['unit_price']}) is less than 0.01 (Digitax minimum)")
+            continue
+        
         # Remove item_code before adding to payload (was only for tracking)
         if "item_code" in item_data:
             del item_data["item_code"]
         payload["items"].append(item_data)
-        logger.info(f"Added to payload: {item_data}")
+    
+    # Check if payload has any items after filtering
+    if not payload["items"]:
+        error_msg = "No items to send to Digitax. All items were filtered out (zero amount or unit_price < 0.01)."
+        logger.error(f"SKIP INVOICE: {error_msg}")
+        
+        frappe.db.set_value(
+            "Sales Invoice",
+            doc.name,
+            "custom_error_message",
+            error_msg,
+            update_modified=False
+        )
+        frappe.db.commit()
+        
+        return {
+            "skipped": True,
+            "reason": "no_items_after_filtering",
+            "message": error_msg
+        }
     
     # Check if any items are missing Digitax IDs
     if missing_items:
