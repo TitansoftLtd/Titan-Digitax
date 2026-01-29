@@ -166,7 +166,7 @@ def send_sales_invoice_to_digitax(docname):
     cancelled_status = digitax_settings.get("cancelled_invoice_status_code") or "04"
     
     payload = {
-        "trader_invoice_number": str(doc.custom_trader_invoice_number) or str(doc.name),
+        "trader_invoice_number": doc.name,
         "items": [],
         "invoice_status_code": submitted_status if doc.docstatus == 1 else cancelled_status,
         "customer_name": str(doc.customer_name),
@@ -211,25 +211,232 @@ def send_sales_invoice_to_digitax(docname):
             frappe.msgprint(f"Original sale not found in Digitax. Cannot process credit note for {doc.name}.")
             return
 
-    # append_invoice_items_to_payload(doc, payload, doc.is_return)
-
-    # Add School Fees as a single item using Digitax item ID
-    # For credit notes, grand_total is negative, so we use abs() to get positive value
-    amount = abs(doc.grand_total)
-    logger.info(f"Calculated amount: {amount} (Original grand_total: {doc.grand_total})")
-    
-    # Get item code from settings to look up Digitax ID
+    # Get default item from Digitax Settings (for discount application)
     default_item_code = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
-    item_description = digitax_settings.get("default_item_description") or "School Fees"
+    logger.info(f"Default item for discounts: {default_item_code}")
     
-    logger.info(f"Looking up Digitax ID for item: {default_item_code}")
+    # Get Digitax ID for default item
+    default_digitax_id = frappe.db.get_value("Item", default_item_code, "custom_digitax_id")
     
-    # Get Digitax item ID from Item master
-    digitax_item_id = frappe.db.get_value("Item", default_item_code, "custom_digitax_id")
+    # Process all invoice line items and send each to Digitax
+    logger.info(f"Processing {len(doc.items)} line items from Sales Invoice")
     
-    if not digitax_item_id:
-        # Item has no Digitax ID - cannot send to Digitax
-        error_msg = f"Item '{default_item_code}' has no Digitax ID. Please sync items from Digitax first."
+    missing_items = []  # Track items without Digitax ID
+    items_dict = {}  # Dictionary to combine duplicate items by Digitax ID
+    discount_items = []  # Track discount items (negative amounts)
+    total_discounts = 0  # Sum of all discount amounts
+    
+    # FIRST PASS: Collect all items and separate discounts
+    for idx, item_row in enumerate(doc.items, 1):
+        item_code = item_row.item_code
+        item_name = item_row.item_name
+        quantity = item_row.qty or 1
+        rate = item_row.rate  # Keep original sign
+        amount = item_row.amount  # Keep original sign
+        
+        # For credit notes, use abs() for all amounts
+        if doc.is_return:
+            rate = abs(rate)
+            amount = abs(amount)
+        
+        discount_pct = item_row.discount_percentage or 0
+        discount_amt = abs(item_row.discount_amount or 0)
+        
+        logger.info(f"[Item {idx}] Code: {item_code}, Name: {item_name}, Qty: {quantity}, Rate: {rate}, Amount: {amount}")
+        
+        # Check if this is a discount item (negative amount)
+        if amount < 0:
+            discount_value = abs(amount)
+            logger.info(f"[Item {idx}] DISCOUNT ITEM detected: {item_name}, Discount Amount: {discount_value}")
+            discount_items.append({
+                "item_code": item_code,
+                "item_name": item_name,
+                "discount_amount": discount_value
+            })
+            total_discounts += discount_value
+            continue  # Skip discount items - don't add to items_dict
+        
+        # Get Digitax item ID from Item master
+        digitax_item_id = frappe.db.get_value("Item", item_code, "custom_digitax_id")
+        
+        if not digitax_item_id:
+            # Item has no Digitax ID - track as missing
+            logger.warning(f"[Item {idx}] Missing Digitax ID for item: {item_code} ({item_name})")
+            missing_items.append({
+                "item_code": item_code,
+                "item_name": item_name,
+                "amount": amount
+            })
+            continue
+        
+        logger.info(f"[Item {idx}] Found Digitax ID: {digitax_item_id}")
+        
+        # Combine duplicate items by Digitax ID
+        if digitax_item_id in items_dict:
+            # Item already exists - combine quantities and amounts
+            existing = items_dict[digitax_item_id]
+            existing["quantity"] += quantity
+            existing["total_amount"] += amount
+            existing["discount_amount"] += discount_amt
+            
+            # Recalculate average unit price
+            existing["unit_price"] = existing["total_amount"] / existing["quantity"]
+            
+            # Use weighted average for discount rate
+            total_before_discount = existing["total_amount"] + existing["discount_amount"]
+            existing["discount_rate"] = (existing["discount_amount"] / total_before_discount * 100) if total_before_discount > 0 else 0
+            
+            logger.info(f"[Item {idx}] COMBINED with existing item. New totals - Qty: {existing['quantity']}, Amount: {existing['total_amount']}")
+        else:
+            # New item - add to dictionary
+            items_dict[digitax_item_id] = {
+                "id": digitax_item_id,
+                "quantity": quantity,
+                "unit_price": rate,
+                "total_amount": amount,
+                "package_unit_quantity": 1,
+                "discount_rate": discount_pct,
+                "discount_amount": discount_amt,
+                "item_description": item_name or item_code,
+                "item_code": item_code,  # Track original item code
+            }
+            logger.info(f"[Item {idx}] Added new item to dictionary")
+    
+    # DISCOUNT HANDLING: Apply discounts to items (highest to lowest value)
+    if discount_items:
+        logger.info(f"Processing {len(discount_items)} discount items. Total discounts: {total_discounts}")
+        
+        # Get all items and sort by amount (highest first)
+        all_items = []
+        total_items_amount = 0
+        
+        for digitax_id, item_data in items_dict.items():
+            all_items.append({
+                "digitax_id": digitax_id,
+                "description": item_data["item_description"],
+                "amount": item_data["total_amount"],
+                "item_data": item_data
+            })
+            total_items_amount += item_data["total_amount"]
+        
+        # Sort items by amount (highest first)
+        all_items.sort(key=lambda x: x["amount"], reverse=True)
+        
+        logger.info(f"Total invoice items amount: {total_items_amount}")
+        logger.info(f"Items sorted by amount (highest first):")
+        for item in all_items:
+            logger.info(f"  - {item['description']}: {item['amount']}")
+        
+        # Check if total discounts exceed total items amount
+        if total_discounts > total_items_amount:
+            # Discounts exceed total items - create actionable item
+            discount_names = [f"{d['item_name']} ({d['discount_amount']})" for d in discount_items]
+            
+            error_msg = (
+                f"Total discounts ({total_discounts}) exceed total invoice items amount ({total_items_amount}). "
+                f"Discounts: {', '.join(discount_names)}"
+            )
+            
+            logger.error(f"SKIP INVOICE: {error_msg}")
+            
+            frappe.db.set_value(
+                "Sales Invoice",
+                doc.name,
+                "custom_error_message",
+                error_msg,
+                update_modified=False
+            )
+            frappe.db.commit()
+            
+            # Create actionable item
+            try:
+                from rusinga_school.rusinga_school.doctype.actionable_items.actionable_items import create_actionable_item
+                
+                create_actionable_item(
+                    title=f"Discounts Exceed Invoice Total: {doc.name}",
+                    item_type="Discount Validation Error",
+                    description=f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
+                               f"<p><strong>Issue:</strong> Total discounts <strong>({total_discounts})</strong> exceed total invoice amount <strong>({total_items_amount})</strong>.</p>"
+                               f"<p><strong>Invoice Items:</strong></p>"
+                               f"<ul>{''.join(f'<li>{item['description']}: {item['amount']}</li>' for item in all_items)}</ul>"
+                               f"<p><strong>Discount Items:</strong></p>"
+                               f"<ul>{''.join(f'<li>{d['item_name']}: {d['discount_amount']}</li>' for d in discount_items)}</ul>"
+                               f"<p><strong>Action:</strong> Reduce discounts to max {total_items_amount} or increase item amounts.</p>",
+                    action_required=f"Reduce total discounts to max {total_items_amount} or adjust invoice amounts",
+                    reference_doctype="Sales Invoice",
+                    reference_name=doc.name,
+                    related_data=frappe.as_json({
+                        "total_discounts": total_discounts,
+                        "total_items_amount": total_items_amount,
+                        "invoice_items": [{"description": item["description"], "amount": item["amount"]} for item in all_items],
+                        "discount_items": discount_items
+                    }),
+                    priority="High"
+                )
+                logger.info(f"Created actionable item for excessive discounts")
+            except ImportError:
+                logger.warning("Could not create actionable item (module not found)")
+            
+            return {
+                "skipped": True,
+                "reason": "discounts_exceed_total",
+                "message": error_msg
+            }
+        
+        # Apply discounts to items (highest to lowest)
+        remaining_discount = total_discounts
+        
+        for item in all_items:
+            if remaining_discount <= 0:
+                break
+            
+            item_data = item["item_data"]
+            original_amount = item["amount"]
+            
+            if remaining_discount >= original_amount:
+                # Discount fully consumes this item
+                discount_to_apply = original_amount
+                remaining_discount -= original_amount
+                new_amount = 0
+                logger.info(f"Applied {discount_to_apply} discount to '{item['description']}'. Item fully discounted (amount now 0).")
+            else:
+                # Partial discount application
+                discount_to_apply = remaining_discount
+                new_amount = original_amount - remaining_discount
+                remaining_discount = 0
+                logger.info(f"Applied {discount_to_apply} discount to '{item['description']}'. New amount: {new_amount}")
+            
+            # Update item amounts
+            item_data["total_amount"] = new_amount
+            item_data["unit_price"] = new_amount / item_data["quantity"] if item_data["quantity"] > 0 else 0
+        
+        logger.info(f"Successfully applied {total_discounts} in discounts across items. Remaining amount to send: {total_items_amount - total_discounts}")
+    
+    # Convert dictionary to list and add to payload
+    for digitax_id, item_data in items_dict.items():
+        # Skip items with zero amount (fully discounted)
+        if item_data["total_amount"] <= 0:
+            logger.info(f"Skipping item '{item_data['item_description']}' - fully discounted (amount: {item_data['total_amount']})")
+            continue
+        
+        # Remove item_code before adding to payload (was only for tracking)
+        if "item_code" in item_data:
+            del item_data["item_code"]
+        payload["items"].append(item_data)
+        logger.info(f"Added to payload: {item_data}")
+    
+    # Check if any items are missing Digitax IDs
+    if missing_items:
+        missing_count = len(missing_items)
+        total_count = len(doc.items)
+        missing_names = [f"{item['item_code']} ({item['item_name']})" for item in missing_items]
+        
+        error_msg = (
+            f"{missing_count} of {total_count} items have no Digitax ID. "
+            f"Please sync items from Digitax first. Missing: {', '.join(missing_names[:3])}"
+            f"{'...' if missing_count > 3 else ''}"
+        )
+        
         logger.error(f"SKIP INVOICE: {error_msg}")
         
         frappe.db.set_value(
@@ -239,34 +446,41 @@ def send_sales_invoice_to_digitax(docname):
             error_msg,
             update_modified=False
         )
+        frappe.db.commit()
         
-        frappe.log_error(
-            message=f"Cannot send Sales Invoice {doc.name} to Digitax: {error_msg}",
-            title="Digitax - Missing Item ID"
-        )
+        # Create actionable item instead of error log
+        try:
+            from rusinga_school.rusinga_school.doctype.actionable_items.actionable_items import create_actionable_item
+            
+            create_actionable_item(
+                title=f"Missing Digitax IDs: {doc.name}",
+                item_type="Missing Digitax IDs",
+                description=f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
+                           f"<p><strong>{missing_count} of {total_count} items</strong> are missing Digitax IDs:</p>"
+                           f"<ul>{''.join(f'<li>{item['item_code']} - {item['item_name']} (Amount: {item['amount']})</li>' for item in missing_items)}</ul>"
+                           f"<p><strong>Status:</strong> Invoice submission blocked until items are synced.</p>",
+                action_required=f"Sync these items from Digitax: {', '.join([item['item_code'] for item in missing_items])}",
+                reference_doctype="Sales Invoice",
+                reference_name=doc.name,
+                related_data=frappe.as_json({
+                    "missing_items": missing_items,
+                    "total_items": total_count,
+                    "missing_count": missing_count
+                }),
+                priority="High" if missing_count >= total_count else "Medium"
+            )
+            logger.info(f"Created actionable item for missing Digitax IDs")
+        except ImportError:
+            # Fallback if actionable items module not available
+            logger.warning("Could not create actionable item (module not found)")
         
         return {
             "skipped": True,
-            "reason": "missing_digitax_item_id",
+            "reason": "missing_digitax_item_ids",
             "message": error_msg
         }
     
-    logger.info(f"Found Digitax item ID: {digitax_item_id}")
-    
-    # Build item payload using Digitax item ID
-    new_item = {
-        "id": digitax_item_id,
-        "quantity": 1,
-        "unit_price": amount,
-        "total_amount": amount,
-        "package_unit_quantity": 1,
-        "discount_rate": 0,
-        "discount_amount": 0,
-        "item_description": item_description,
-    }
-
-    payload["items"].append(new_item)
-    logger.info(f"Item added to payload: {new_item}")
+    logger.info(f"All {len(doc.items)} items have Digitax IDs - ready to send")
 
     payload = json.dumps(payload)
     logger.info(f"Final API URL: {url}")
