@@ -157,6 +157,10 @@ scheduler_events = {
     "cron": {
         "*/15 * * * *": [
             "titan_digitax.titan_digitax.utils.sales.job_retry_sending_sales_invoices"
+        ],
+        # Hourly Digitax item sync (enabled)
+        "0 * * * *": [
+            "titan_digitax.titan_digitax.doctype.digitax_sync_job.digitax_sync_job.digitax_sync_items_hourly"
         ]
     }
 	# "all": [

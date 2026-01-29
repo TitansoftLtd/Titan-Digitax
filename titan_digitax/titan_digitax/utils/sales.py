@@ -50,7 +50,8 @@ def append_invoice_items_to_payload(doc, payload, is_return, digitax_settings=No
                 # Use item-specific codes or fall back to defaults from Digitax Settings
                 new_item["item_class_code"] = item.custom_item_class_code or default_item_class_code
                 new_item["item_tax_type_code"] = item.custom_tax_type_code or default_item_tax_type_code
-                new_item["is_stockable"] = True if item.custom_is_stockable else False
+                # Use standard ERPNext is_stock_item field
+                new_item["is_stockable"] = True if item.is_stock_item else False
 
             payload["items"].append(new_item)
 
