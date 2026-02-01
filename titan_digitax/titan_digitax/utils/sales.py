@@ -295,23 +295,41 @@ def send_sales_invoice_to_digitax(docname):
         if digitax_item_id in items_dict:
             # Item already exists - combine quantities and amounts
             existing = items_dict[digitax_item_id]
-            existing["quantity"] = abs(existing["quantity"] + quantity)  # Ensure positive
-            existing["total_amount"] = abs(existing["total_amount"] + amount)  # Ensure positive
+            combined_qty = abs(existing["quantity"] + quantity)
+            combined_amount = abs(existing["total_amount"] + amount)
             existing["discount_amount"] += discount_amt
             
-            # Recalculate average unit price (ensure positive)
-            existing["unit_price"] = abs(existing["total_amount"] / existing["quantity"]) if existing["quantity"] > 0 else 0
+            # CRITICAL: Digitax validates quantity * unit_price == total_amount (exactly)
+            # Must round unit_price first, then recalculate total_amount to ensure perfect match
+            if combined_qty > 0:
+                # Calculate unit price and round to 2 decimals
+                unit_pr = round(combined_amount / combined_qty, 2)
+                # Recalculate total from rounded unit price - this ensures exact validation
+                exact_total = round(unit_pr * combined_qty, 2)
+                
+                existing["quantity"] = combined_qty
+                existing["unit_price"] = unit_pr
+                existing["total_amount"] = exact_total
+            else:
+                existing["quantity"] = combined_qty
+                existing["unit_price"] = 0
+                existing["total_amount"] = 0
             
             # Use weighted average for discount rate
             total_before_discount = existing["total_amount"] + existing["discount_amount"]
             existing["discount_rate"] = (existing["discount_amount"] / total_before_discount * 100) if total_before_discount > 0 else 0
         else:
-            # New item - add to dictionary
+            # New item - add to dictionary with rounding to avoid floating point errors
+            # Digitax validates: quantity * unit_price == total_amount (exactly)
+            qty = abs(quantity)
+            unit_pr = round(abs(rate), 2)
+            total_amt = round(unit_pr * qty, 2)  # Recalculate to ensure exact match
+            
             items_dict[digitax_item_id] = {
                 "id": digitax_item_id,
-                "quantity": abs(quantity),  # Ensure positive
-                "unit_price": abs(rate),  # Ensure positive
-                "total_amount": abs(amount),  # Ensure positive
+                "quantity": qty,
+                "unit_price": unit_pr,
+                "total_amount": total_amt,
                 "package_unit_quantity": 1,
                 "discount_rate": discount_pct,
                 "discount_amount": discount_amt,
@@ -423,9 +441,15 @@ def send_sales_invoice_to_digitax(docname):
                 remaining_discount = 0
                 logger.info(f"Applied {discount_to_apply} discount to '{item['description']}'. New amount: {new_amount}")
             
-            # Update item amounts (ensure positive values)
+            # Update item amounts with rounding to avoid floating point errors
+            # Digitax validates: quantity * unit_price == total_amount (exactly)
             item_data["total_amount"] = abs(new_amount)
-            item_data["unit_price"] = abs(new_amount / item_data["quantity"]) if item_data["quantity"] > 0 else 0
+            if item_data["quantity"] > 0:
+                item_data["unit_price"] = round(abs(new_amount / item_data["quantity"]), 2)
+                # Recalculate total_amount from rounded unit_price to ensure exact match
+                item_data["total_amount"] = round(item_data["unit_price"] * item_data["quantity"], 2)
+            else:
+                item_data["unit_price"] = 0
         
         logger.info(f"Successfully applied {total_discounts} in discounts across items. Remaining amount to send: {total_items_amount - total_discounts}")
     
@@ -522,6 +546,50 @@ def send_sales_invoice_to_digitax(docname):
         }
     
     logger.info(f"All {len(doc.items)} items have Digitax IDs - ready to send")
+
+    # For credit notes: Validate against original invoice
+    if doc.is_return and doc.return_against:
+        try:
+            original_invoice = frappe.get_doc("Sales Invoice", doc.return_against)
+            credit_note_total = sum(item["total_amount"] for item in payload["items"])
+            original_total = abs(original_invoice.grand_total)
+            
+            logger.info(f"CREDIT NOTE VALIDATION:")
+            logger.info(f"  Original Invoice: {doc.return_against}")
+            logger.info(f"  Original Invoice Total: {original_total}")
+            logger.info(f"  Credit Note Total: {credit_note_total}")
+            logger.info(f"  Credit Note Items Count: {len(payload['items'])}")
+            logger.info(f"  Original Invoice Items Count: {len(original_invoice.items)}")
+            
+            if credit_note_total > original_total:
+                error_msg = (
+                    f"Credit note total ({credit_note_total}) exceeds original invoice total ({original_total}). "
+                    f"Original Invoice: {doc.return_against}"
+                )
+                logger.error(f"SKIP CREDIT NOTE: {error_msg}")
+                
+                frappe.db.set_value(
+                    "Sales Invoice",
+                    doc.name,
+                    "custom_error_message",
+                    error_msg,
+                    update_modified=False
+                )
+                frappe.db.commit()
+                
+                return {
+                    "skipped": True,
+                    "reason": "credit_note_exceeds_original",
+                    "message": error_msg
+                }
+            
+            # Check for duplicate item IDs in payload
+            item_ids = [item["id"] for item in payload["items"]]
+            if len(item_ids) != len(set(item_ids)):
+                duplicates = [item_id for item_id in item_ids if item_ids.count(item_id) > 1]
+                logger.warning(f"DUPLICATE ITEM IDs DETECTED IN PAYLOAD: {set(duplicates)}")
+        except Exception as validation_error:
+            logger.error(f"Credit note validation failed: {str(validation_error)}")
 
     payload = json.dumps(payload)
     logger.info(f"Final API URL: {url}")
