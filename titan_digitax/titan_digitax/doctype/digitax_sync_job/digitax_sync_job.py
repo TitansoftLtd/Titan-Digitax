@@ -159,6 +159,63 @@ def sync_customers_from_digitax(start_time=None, end_time=None):
 	}
 
 
+def _sync_item_price_to_standard_selling(item_name, price):
+	"""
+	Helper function to create/update Item Price for Standard Selling price list.
+	
+	Args:
+		item_name (str): Item code
+		price (float): Price to set
+	"""
+	if not price or price <= 0:
+		return
+	
+	price_list = "Standard Selling"
+	
+	# Check if Item Price already exists
+	existing_price = frappe.db.get_value(
+		"Item Price",
+		{
+			"item_code": item_name,
+			"price_list": price_list
+		},
+		["name", "price_list_rate"],
+		as_dict=True
+	)
+	
+	if existing_price:
+		# Update existing price if it changed
+		if existing_price.price_list_rate != price:
+			frappe.db.set_value(
+				"Item Price",
+				existing_price.name,
+				"price_list_rate",
+				price
+			)
+			frappe.logger().info(
+				f"Updated Standard Selling price for {item_name}: "
+				f"{existing_price.price_list_rate} → {price}"
+			)
+	else:
+		# Create new Item Price
+		try:
+			item_price = frappe.get_doc({
+				"doctype": "Item Price",
+				"item_code": item_name,
+				"price_list": price_list,
+				"price_list_rate": price,
+				"currency": "KES"
+			})
+			item_price.insert(ignore_permissions=True)
+			frappe.logger().info(
+				f"Created Standard Selling price for {item_name}: {price}"
+			)
+		except Exception as e:
+			frappe.logger().error(
+				f"Failed to create Item Price for {item_name}: {str(e)}"
+			)
+
+
 def get_or_create_digitax_item(item_data):
 	"""
 	Get or create item from Digitax data.
@@ -290,6 +347,12 @@ def get_or_create_digitax_item(item_data):
 				f"Updated Digitax item: {existing_item.name} "
 				f"(changed fields: {', '.join(fields_to_update.keys())})"
 			)
+			
+			# Sync price to Item Price if available
+			default_unit_price = item_data.get("default_unit_price")
+			if default_unit_price:
+				_sync_item_price_to_standard_selling(existing_item.name, default_unit_price)
+			
 			return {"status": "updated", "item_name": existing_item.name}
 		else:
 			# No changes detected - don't save
@@ -308,6 +371,12 @@ def get_or_create_digitax_item(item_data):
 			})
 			new_item.insert(ignore_permissions=True)
 			frappe.logger().info(f"Created Digitax item: {new_item.name}")
+			
+			# Sync price to Item Price if available
+			default_unit_price = item_data.get("default_unit_price")
+			if default_unit_price:
+				_sync_item_price_to_standard_selling(new_item.name, default_unit_price)
+			
 			return {"status": "created", "item_name": new_item.name}
 			
 		except frappe.DuplicateEntryError:

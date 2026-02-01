@@ -197,3 +197,51 @@ class DigitaxClient:
 		
 		frappe.logger().info(f"Completed fetching all items: {len(all_items)} items across {page_count} pages")
 		return all_items
+	
+	def create_item(self, payload):
+		"""
+		Create a new item in Digitax.
+		
+		Args:
+			payload (dict): Item data to send to Digitax
+		
+		Returns:
+			dict: Digitax response with item ID, etims_item_code, status, etc.
+		
+		Raises:
+			requests.HTTPError: If the API request fails
+		"""
+		endpoint = f"{self.base_url}/items"
+		
+		frappe.logger().info(f"Creating item in Digitax: {payload.get('item_name')}")
+		
+		try:
+			response = self.session.post(
+				endpoint,
+				json=payload,
+				timeout=self.timeout
+			)
+			response.raise_for_status()
+			
+			data = response.json()
+			frappe.logger().info(
+				f"Successfully created item in Digitax: {data.get('id')} "
+				f"(ETIMS: {data.get('etims_item_code')}, Status: {data.get('status')})"
+			)
+			return data
+			
+		except requests.exceptions.HTTPError as e:
+			error_msg = f"Digitax API error creating item: {e.response.status_code}"
+			try:
+				error_data = e.response.json()
+				error_msg += f" - {error_data}"
+			except:
+				error_msg += f" - {e.response.text}"
+			
+			frappe.logger().error(error_msg)
+			raise
+			
+		except requests.exceptions.RequestException as e:
+			error_msg = f"Network error creating item in Digitax: {str(e)}"
+			frappe.logger().error(error_msg)
+			raise
