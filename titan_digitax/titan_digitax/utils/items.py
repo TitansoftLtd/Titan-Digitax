@@ -71,7 +71,7 @@ def sync_item_to_digitax(item_name):
 			
 			create_actionable_item(
 				title=f"Missing Required Fields: {item_name}",
-				item_type="Digitax Item Sync Failed",
+				item_type="Validation Error",
 				description=f"<p>Item <strong>{item_name}</strong> cannot be synced to Digitax because required fields are missing.</p>"
 						   f"<p><strong>Missing Fields:</strong></p>"
 						   f"<ul>{''.join(f'<li>{field}</li>' for field in missing_fields)}</ul>",
@@ -133,7 +133,7 @@ def sync_item_to_digitax(item_name):
 		
 		create_actionable_item(
 			title=f"Digitax Sync Failed: {item_name}",
-			item_type="Digitax Item Sync Failed",
+			item_type="Data Sync Issue",
 			description=f"<p>Failed to sync item <strong>{item_name}</strong> to Digitax.</p>"
 					   f"<p><strong>Error:</strong> {str(e)}</p>",
 			action_required=f"Review error and retry sync: {str(e)}",
