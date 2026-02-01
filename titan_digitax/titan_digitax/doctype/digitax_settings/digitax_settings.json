@@ -17,8 +17,13 @@
   "background_job_timeout",
   "default_item_settings_section",
   "default_item_class_code",
+  "default_item_type_code",
   "column_break_items",
   "default_item_tax_type_code",
+  "default_origin_nation_code",
+  "column_break_items_2",
+  "default_package_unit_code",
+  "default_quantity_unit_code",
   "school_fees_item_section",
   "default_item_bar_code",
   "default_item_name",
@@ -149,6 +154,13 @@
    "label": "Default Item Class Code"
   },
   {
+   "default": "3",
+   "description": "Default item type code for auto-created items (3=Service)",
+   "fieldname": "default_item_type_code",
+   "fieldtype": "Data",
+   "label": "Default Item Type Code"
+  },
+  {
    "fieldname": "column_break_items",
    "fieldtype": "Column Break"
   },
@@ -159,6 +171,31 @@
    "fieldtype": "Select",
    "label": "Default Item Tax Type Code",
    "options": "\nA\nB\nC\nD\nE"
+  },
+  {
+   "default": "KE",
+   "description": "Default origin nation code for auto-created items",
+   "fieldname": "default_origin_nation_code",
+   "fieldtype": "Data",
+   "label": "Default Origin Nation Code"
+  },
+  {
+   "fieldname": "column_break_items_2",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "NT",
+   "description": "Default package unit code for auto-created items (NT=Not Applicable)",
+   "fieldname": "default_package_unit_code",
+   "fieldtype": "Data",
+   "label": "Default Package Unit Code"
+  },
+  {
+   "default": "U",
+   "description": "Default quantity unit code for auto-created items (U=Unit)",
+   "fieldname": "default_quantity_unit_code",
+   "fieldtype": "Data",
+   "label": "Default Quantity Unit Code"
   },
   {
    "fieldname": "school_fees_item_section",
@@ -202,7 +239,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-01-25 16:59:53.529077",
+ "modified": "2026-02-01 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Settings",

@@ -207,23 +207,51 @@ class DigitaxClient:
 		
 		Returns:
 			dict: Digitax response with item ID, etims_item_code, status, etc.
+				  Includes 'http_status_code' key with the HTTP status code
 		"""
 		frappe.logger().info(f"Creating item in Digitax: {payload.get('item_name')}")
 		
 		try:
-			# Use existing _make_request method which handles auth and errors
-			data = self._make_request(
-				method="POST",
-				endpoint="/items",
-				data=payload
+			# Make direct request to get status code
+			url = f"{self.base_url}/items"
+			headers = self._get_headers()
+			
+			response = requests.post(
+				url=url,
+				headers=headers,
+				json=payload,
+				timeout=self.timeout
 			)
+			
+			frappe.logger().info(f"Digitax item creation response: HTTP {response.status_code}")
+			
+			# Handle errors
+			if response.status_code >= 400:
+				error_msg = f"Digitax API error: {response.status_code} - {response.text}"
+				frappe.logger().error(error_msg)
+				frappe.throw(error_msg)
+			
+			# Parse response
+			data = response.json()
+			
+			# Add HTTP status code to response for caller
+			data['http_status_code'] = response.status_code
 			
 			frappe.logger().info(
-				f"Successfully created item in Digitax: {data.get('id')} "
-				f"(ETIMS: {data.get('etims_item_code')}, Status: {data.get('status')})"
+				f"Item creation response: HTTP {response.status_code}, "
+				f"ID: {data.get('id')}, ETIMS: {data.get('etims_item_code')}"
 			)
+			
 			return data
 			
+		except requests.exceptions.Timeout:
+			error_msg = f"Digitax API request timed out after {self.timeout} seconds"
+			frappe.logger().error(error_msg)
+			frappe.throw(error_msg)
+		except requests.exceptions.RequestException as e:
+			error_msg = f"Digitax API request failed: {str(e)}"
+			frappe.logger().error(error_msg)
+			frappe.throw(error_msg)
 		except Exception as e:
 			error_msg = f"Failed to create item in Digitax: {str(e)}"
 			frappe.logger().error(error_msg)
