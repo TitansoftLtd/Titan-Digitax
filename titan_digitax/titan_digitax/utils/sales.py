@@ -205,6 +205,9 @@ def send_sales_invoice_to_digitax(docname):
     logger.info(f"Item added to payload: {new_item}")
 
     payload = json.dumps(payload)
+    frappe.utils.logger.set_log_level("INFO")
+    payload_logger = frappe.logger("digitax_payloads", allow_site=True, file_count=10)
+    payload_logger.info(f"Payload for Sales Invoice {doc.name}:\n{json.dumps(json.loads(payload), indent=2)}")
     logger.info(f"Final API URL: {url}")
     logger.info(f"Payload: {payload}")
 
