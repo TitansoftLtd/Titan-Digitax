@@ -137,14 +137,14 @@ def send_sales_invoice_to_digitax(docname):
     cancelled_status = digitax_settings.get("cancelled_invoice_status_code") or "04"
     
     payload = {
-        "trader_invoice_number": str(doc.custom_trader_invoice_number) or str(doc.name),
+        "trader_invoice_number": str(doc.custom_trader_invoice_number or (doc.name.replace("/", "_") if doc.name else "")),
         "items": [],
         "invoice_status_code": submitted_status if doc.docstatus == 1 else cancelled_status,
         "customer_name": str(doc.customer_name),
         "callback_url": get_digitax_callback_url_for_sales_with_items(),
     }
 
-    if str(doc.tax_id):
+    if doc.tax_id:
         payload["customer_tin"] = str(doc.tax_id)
 
     if not doc.is_return:
