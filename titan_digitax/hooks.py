@@ -155,7 +155,7 @@ doc_events = {
 
 scheduler_events = {
     "cron": {
-        "*/15 * * * *": [
+        "0 * * * *": [
             "titan_digitax.titan_digitax.utils.sales.job_retry_sending_sales_invoices"
         ]
     }

@@ -1,6 +1,8 @@
 import frappe
 import json
 import requests
+from frappe import _
+from frappe.utils import now_datetime, today
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
 
 
@@ -91,9 +93,9 @@ def send_sales_invoice_to_digitax(docname):
         "callback_url": get_digitax_callback_url_for_sales_with_items(),
     }
 
-    # Only add customer_tin and customer_name if tax_id is present
-    if doc.tax_id:
-        payload["customer_tin"] = str(doc.tax_id)
+    customer_pin = resolve_digitax_customer_pin(doc)
+    if customer_pin.get("pin"):
+        payload["customer_tin"] = str(customer_pin.get("pin"))
         payload["customer_name"]= str(doc.customer_name)
 
     if not doc.is_return:
@@ -535,5 +537,642 @@ def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger):
         response_data["status"] = "Already Exists"
     
     logger.info(f"Invoice marked as synced (already exists in Digitax)")
+    return response_data
+
+
+def resolve_digitax_customer_pin(doc):
+    """
+    Resolve the customer PIN for Digitax payloads.
+
+    Parent is the operational source in Braeburn, while Customer and Sales
+    Invoice are retained as fallbacks for older data.
+    """
+    parent_code = getattr(doc, "parent_code", None)
+    if parent_code:
+        parent_pin = _get_parent_pin(parent_code)
+        if parent_pin:
+            return {"pin": parent_pin, "source": "Parent", "parent_code": parent_code}
+
+    customer = getattr(doc, "customer", None)
+    if customer:
+        parent_pin = _get_parent_pin_from_customer(customer)
+        if parent_pin:
+            return parent_pin
+
+        customer_pin = frappe.db.get_value("Customer", customer, "tax_id")
+        if customer_pin:
+            return {"pin": customer_pin, "source": "Customer", "parent_code": None}
+
+    invoice_pin = getattr(doc, "tax_id", None)
+    if invoice_pin:
+        return {"pin": invoice_pin, "source": "Sales Invoice", "parent_code": parent_code}
+
+    return {"pin": None, "source": "Not Provided", "parent_code": parent_code}
+
+
+def _get_parent_pin(parent_code):
+    if not parent_code:
+        return None
+
+    try:
+        frappe.get_meta("Parent")
+    except Exception:
+        return None
+
+    parent_name = None
+    if frappe.db.exists("Parent", parent_code):
+        parent_name = parent_code
+
+    if not parent_name:
+        parent_name = frappe.db.get_value("Parent", {"parent_code": parent_code}, "name")
+
+    if not parent_name:
+        parent_name = frappe.db.get_value("Parent", {"account_code": parent_code}, "name")
+
+    if parent_name:
+        return frappe.db.get_value("Parent", parent_name, "tax_id")
+
+    return None
+
+
+def _get_parent_pin_from_customer(customer):
+    try:
+        customer_doc = frappe.get_cached_doc("Customer", customer)
+    except Exception:
+        return None
+
+    for row in customer_doc.get("custom_parents") or []:
+        parent_code = row.get("parent_code")
+        parent_pin = _get_parent_pin(parent_code)
+        if parent_pin:
+            return {"pin": parent_pin, "source": "Parent", "parent_code": parent_code}
+
+    return None
+
+
+def _get_api_timeout(digitax_settings):
+    try:
+        api_timeout = int(digitax_settings.get("api_request_timeout") or 30)
+        return api_timeout if api_timeout > 0 else 30
+    except (TypeError, ValueError):
+        return 30
+
+
+def _get_digitax_headers():
+    digitax_base_url, digitax_api_key = get_digitax_credentials()
+    return digitax_base_url, {
+        "accept": "application/json",
+        "X-API-Key": digitax_api_key,
+        "content-type": "application/json",
+    }
+
+
+def _get_trader_invoice_base(doc):
+    return str(doc.custom_trader_invoice_number or (doc.name.replace("/", "_") if doc.name else ""))
+
+
+def _get_default_digitax_item(doc, digitax_settings, include_sale_fields):
+    amount = abs(doc.grand_total)
+    item = {
+        "item_bar_code": digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES",
+        "quantity": 1,
+        "unit_price": amount,
+        "total_amount": amount,
+        "package_unit_quantity": amount,
+        "discount_rate": 0,
+        "discount_amount": 0,
+        "item_description": digitax_settings.get("default_item_description") or "School Fees",
+    }
+
+    if include_sale_fields:
+        item.update({
+            "item_name": digitax_settings.get("default_item_name") or "School Fees",
+            "item_class_code": digitax_settings.get("default_item_class_code") or "99020000",
+            "item_tax_type_code": digitax_settings.get("default_item_tax_type_code") or "D",
+            "is_stockable": bool(digitax_settings.get("default_is_stockable")),
+        })
+
+    return item
+
+
+def _validate_virtual_amendment_user(digitax_settings):
+    role = digitax_settings.get("virtual_amendment_role")
+    if not role:
+        frappe.throw(
+            _("Set Virtual Amendment Role in Digitax Settings before using virtual amendments."),
+            title=_("Digitax Role Not Configured"),
+        )
+
+    if not _user_has_role(role):
+        frappe.throw(
+            _("You need the {0} role to create Digitax virtual amendments.").format(role),
+            title=_("Not Permitted"),
+        )
+
+
+def _user_has_role(role, user=None):
+    if not role:
+        return False
+
+    return role in (frappe.get_roles(user or frappe.session.user) or [])
+
+
+def _validate_virtual_amendment_invoice(doc):
+    if doc.docstatus != 1:
+        frappe.throw(_("Digitax virtual amendments can only be created from submitted Sales Invoices."))
+
+    if doc.is_return:
+        frappe.throw(_("Digitax virtual amendments can only be created from original Sales Invoices, not Credit Notes."))
+
+    if not doc.custom_sent_to_digitax and not doc.custom_sale_id:
+        frappe.throw(_("This Sales Invoice has not been sent to Digitax yet."))
+
+
+def _load_virtual_amendment_context(invoice_name):
+    digitax_settings = frappe.get_single("Digitax Settings")
+    _validate_virtual_amendment_user(digitax_settings)
+
+    doc = frappe.get_doc("Sales Invoice", invoice_name)
+    _validate_virtual_amendment_invoice(doc)
+
+    return doc, digitax_settings
+
+
+def _require_correction_reason(correction_reason):
+    correction_reason = (correction_reason or "").strip()
+    if not correction_reason:
+        frappe.throw(_("Please provide a correction reason before sending a Digitax virtual amendment."))
+    return correction_reason
+
+
+def _get_response_field_mapping(response_data):
+    response_data = response_data or {}
+    return {
+        "custom_offline_url": response_data.get("offline_url", ""),
+        "custom_etims_url": response_data.get("etims_url", ""),
+        "custom_sale_detail_url": response_data.get("sale_detail_url", ""),
+        "custom_serial_number": response_data.get("serial_number", ""),
+        "custom_invoice_number": response_data.get("invoice_number", ""),
+        "custom_digitax_status": response_data.get("status", ""),
+        "custom_sale_id": response_data.get("id", ""),
+        "custom_date": response_data.get("date", ""),
+        "custom_time": response_data.get("time", ""),
+        "custom_receipt_type_code": response_data.get("receipt_type_code", ""),
+        "custom_original_sale_id": response_data.get("original_sale_id", ""),
+        "custom_sent_to_digitax": 1,
+        "custom_error_message": "",
+    }
+
+
+def _get_child_response_fields(response_data):
+    response_data = response_data or {}
+    return {
+        "digitax_sale_id": response_data.get("id", ""),
+        "digitax_status": response_data.get("status", ""),
+        "offline_url": response_data.get("offline_url", ""),
+        "etims_url": response_data.get("etims_url", ""),
+        "sale_detail_url": response_data.get("sale_detail_url", ""),
+        "serial_number": response_data.get("serial_number", ""),
+        "invoice_number": response_data.get("invoice_number", ""),
+        "receipt_type_code": response_data.get("receipt_type_code", ""),
+        "original_sale_id": response_data.get("original_sale_id", ""),
+        "digitax_date": response_data.get("date", ""),
+        "digitax_time": response_data.get("time", ""),
+    }
+
+
+def _find_original_sale_row(doc):
+    for row in doc.get("custom_digitax_amendments") or []:
+        if row.amendment_type == "Original Sale" and row.status == "Sent":
+            return row
+    return None
+
+
+def _ensure_original_sale_row(doc):
+    existing = _find_original_sale_row(doc)
+    if existing:
+        return existing
+
+    if not doc.custom_sale_id:
+        frappe.throw(_("Original Digitax sale ID is missing. Cannot start a virtual amendment."))
+
+    row = doc.append("custom_digitax_amendments", {
+        "amendment_type": "Original Sale",
+        "trader_invoice_number": _get_trader_invoice_base(doc),
+        "status": "Sent",
+        "digitax_sale_id": doc.custom_sale_id,
+        "digitax_status": doc.custom_digitax_status,
+        "offline_url": doc.custom_offline_url,
+        "etims_url": doc.custom_etims_url,
+        "sale_detail_url": doc.custom_sale_detail_url,
+        "serial_number": doc.custom_serial_number,
+        "invoice_number": doc.custom_invoice_number,
+        "receipt_type_code": doc.custom_receipt_type_code,
+        "original_sale_id": doc.custom_original_sale_id,
+        "digitax_date": doc.custom_date,
+        "digitax_time": doc.custom_time,
+        "amount": abs(doc.grand_total),
+        "customer_pin_after": doc.tax_id,
+        "customer_pin_source_after": "Sales Invoice",
+        "customer_name_after": doc.customer_name,
+        "sent_on": now_datetime(),
+        "sent_by": frappe.session.user,
+    })
+    doc.flags.ignore_validate_update_after_submit = True
+    doc.save(ignore_permissions=True)
+    return row
+
+
+def _get_virtual_amendment_state(doc):
+    base = _get_trader_invoice_base(doc)
+    rows = [row for row in (doc.get("custom_digitax_amendments") or []) if row.status == "Sent"]
+    original_row = _find_original_sale_row(doc)
+
+    active_sale_id = doc.custom_sale_id
+    active_trader_invoice_number = base
+    active_row_name = None
+    active_type = "Original Sale"
+
+    if original_row:
+        active_sale_id = original_row.digitax_sale_id
+        active_trader_invoice_number = original_row.trader_invoice_number
+        active_row_name = original_row.name
+
+    sent_virtual_sales = []
+    sent_virtual_reversals = []
+
+    for row in rows:
+        if row.amendment_type == "Virtual Credit Note":
+            sent_virtual_reversals.append(row)
+            if active_sale_id and row.reference_sale_id == active_sale_id:
+                active_sale_id = None
+                active_trader_invoice_number = None
+                active_row_name = None
+                active_type = None
+        elif row.amendment_type == "Virtual Sale":
+            sent_virtual_sales.append(row)
+            active_sale_id = row.digitax_sale_id
+            active_trader_invoice_number = row.trader_invoice_number
+            active_row_name = row.name
+            active_type = "Virtual Sale"
+
+    next_sale_number = len(sent_virtual_sales) + 1
+    if active_type == "Original Sale":
+        next_reversal_number = None
+        next_reversal_trader_invoice_number = f"{base}-R"
+    elif active_type == "Virtual Sale":
+        next_reversal_number = len(sent_virtual_sales)
+        next_reversal_trader_invoice_number = f"{base}-R{next_reversal_number}"
+    else:
+        next_reversal_number = None
+        next_reversal_trader_invoice_number = None
+
+    return {
+        "base": base,
+        "active_sale_id": active_sale_id,
+        "active_trader_invoice_number": active_trader_invoice_number,
+        "active_row_name": active_row_name,
+        "active_type": active_type,
+        "next_sale_number": next_sale_number,
+        "next_sale_trader_invoice_number": f"{base}-S{next_sale_number}",
+        "next_reversal_number": next_reversal_number,
+        "next_reversal_trader_invoice_number": next_reversal_trader_invoice_number,
+        "has_reversal_waiting_for_sale": bool(sent_virtual_reversals and not active_sale_id),
+    }
+
+
+def _throw_if_sent_trader_exists(doc, trader_invoice_number):
+    for row in doc.get("custom_digitax_amendments") or []:
+        if row.trader_invoice_number == trader_invoice_number and row.status == "Sent":
+            frappe.throw(_("Digitax amendment {0} has already been sent.").format(trader_invoice_number))
+
+
+def _build_virtual_reversal_payload(doc, digitax_settings, state):
+    submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
+    payload = {
+        "trader_invoice_number": state["next_reversal_trader_invoice_number"],
+        "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=False)],
+        "invoice_status_code": submitted_status,
+        "callback_url": get_digitax_callback_url_for_sales_with_items(),
+        "return_date": today(),
+        "sale_id": state["active_sale_id"],
+    }
+
+    customer_pin = resolve_digitax_customer_pin(doc)
+    if customer_pin.get("pin"):
+        payload["customer_tin"] = str(customer_pin.get("pin"))
+        payload["customer_name"] = str(doc.customer_name)
+
+    return payload
+
+
+def _build_virtual_sale_payload(doc, digitax_settings, state):
+    submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
+    payload = {
+        "trader_invoice_number": state["next_sale_trader_invoice_number"],
+        "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=True)],
+        "invoice_status_code": submitted_status,
+        "callback_url": get_digitax_callback_url_for_sales_with_items(),
+        "sale_date": today(),
+        "receipt_type_code": digitax_settings.get("default_receipt_type_code") or "S",
+        "payment_type_code": digitax_settings.get("default_payment_type_code") or "01",
+    }
+
+    customer_pin = resolve_digitax_customer_pin(doc)
+    if customer_pin.get("pin"):
+        payload["customer_tin"] = str(customer_pin.get("pin"))
+        payload["customer_name"] = str(doc.customer_name)
+
+    return payload
+
+
+def _post_virtual_amendment(url, payload, digitax_settings, logger):
+    digitax_base_url, headers = _get_digitax_headers()
+    if not digitax_base_url:
+        frappe.throw(_("Digitax Base URL is not configured."))
+
+    api_timeout = _get_api_timeout(digitax_settings)
+    response = requests.post(
+        f"{digitax_base_url.rstrip('/')}/{url.lstrip('/')}",
+        headers=headers,
+        data=json.dumps(payload),
+        timeout=api_timeout,
+    )
+
+    try:
+        response_data = response.json()
+    except Exception:
+        response_data = {"error": "Invalid JSON response", "raw": response.text}
+
+    if response.status_code == 409 and "trader_invoice_number has already been used" in (response_data.get("message", "").lower()):
+        existing_sale_id = (response_data.get("metadata") or {}).get("existing_sale_id", "")
+        if existing_sale_id:
+            sale_details = fetch_sale_details_from_digitax(existing_sale_id)
+            if sale_details:
+                sale_details["already_exists"] = True
+                return sale_details, 200
+
+        response_data["already_exists"] = True
+        response_data["id"] = existing_sale_id
+        response_data["status"] = "Already Exists"
+        return response_data, 200
+
+    if response.status_code >= 400:
+        logger.error(f"Digitax virtual amendment failed: {response.status_code} {response_data}")
+
+    return response_data, response.status_code
+
+
+def _append_virtual_amendment_row(doc, row_data):
+    row = doc.append("custom_digitax_amendments", row_data)
+    doc.flags.ignore_validate_update_after_submit = True
+    doc.save(ignore_permissions=True)
+    return row
+
+
+def _mark_invoice_awaiting_corrected_sale(invoice_name):
+    frappe.db.set_value(
+        "Sales Invoice",
+        invoice_name,
+        {
+            "custom_sale_id": "",
+            "custom_offline_url": "",
+            "custom_etims_url": "",
+            "custom_sale_detail_url": "",
+            "custom_serial_number": "",
+            "custom_invoice_number": "",
+            "custom_digitax_status": "Awaiting Corrected Virtual Sale",
+            "custom_date": "",
+            "custom_time": "",
+            "custom_receipt_type_code": "",
+            "custom_original_sale_id": "",
+            "custom_error_message": "",
+        },
+        update_modified=False,
+    )
+
+
+def _update_invoice_active_digitax_sale(invoice_name, response_data):
+    frappe.db.set_value("Sales Invoice", invoice_name, _get_response_field_mapping(response_data), update_modified=False)
+
+
+def _json_dump(data):
+    return json.dumps(data or {}, indent=2, default=str)
+
+
+def _build_preview_response(action, doc, trader_invoice_number, correction_reason, before_values, after_values):
+    return {
+        "action": action,
+        "invoice_name": doc.name,
+        "customer": doc.customer_name,
+        "trader_invoice_number": trader_invoice_number,
+        "amount": abs(doc.grand_total),
+        "item": "School Fees",
+        "correction_reason": correction_reason,
+        "before": before_values,
+        "after": after_values,
+        "warning": _("This Digitax virtual amendment does not change accounts, receivables, MIS balances, or Sage."),
+    }
+
+
+def _build_virtual_reversal_preview(doc, state, correction_reason):
+    customer_pin = resolve_digitax_customer_pin(doc)
+    return _build_preview_response(
+        "Virtual Credit Note",
+        doc,
+        state["next_reversal_trader_invoice_number"],
+        correction_reason,
+        {
+            "Digitax Sale ID": state.get("active_sale_id"),
+            "Trader Invoice No.": state.get("active_trader_invoice_number"),
+            "Amount": abs(doc.grand_total),
+            "Status": "Active Digitax Sale",
+        },
+        {
+            "Digitax Sale ID": "No active sale until corrected virtual sale is sent",
+            "Trader Invoice No.": state["next_reversal_trader_invoice_number"],
+            "Amount": abs(doc.grand_total),
+            "Status": "Awaiting Corrected Virtual Sale",
+            "Correction Reason": correction_reason,
+            "Customer PIN": customer_pin.get("pin") or "Not provided",
+            "PIN Source": customer_pin.get("source"),
+        },
+    )
+
+
+def _build_virtual_sale_preview(doc, state, correction_reason):
+    customer_pin = resolve_digitax_customer_pin(doc)
+    return _build_preview_response(
+        "Virtual Sale",
+        doc,
+        state["next_sale_trader_invoice_number"],
+        correction_reason,
+        {
+            "Customer PIN": doc.tax_id or "Not provided",
+            "PIN Source": "Sales Invoice" if doc.tax_id else "Not Provided",
+            "Customer Name": doc.customer_name,
+            "Trader Invoice No.": "Awaiting corrected virtual sale",
+            "Digitax Sale ID": "No active sale",
+            "Amount": abs(doc.grand_total),
+        },
+        {
+            "Customer PIN": customer_pin.get("pin") or "Not provided",
+            "PIN Source": customer_pin.get("source"),
+            "Customer Name": doc.customer_name,
+            "Trader Invoice No.": state["next_sale_trader_invoice_number"],
+            "Digitax Sale ID": "New sale will be created",
+            "Amount": abs(doc.grand_total),
+            "Correction Reason": correction_reason,
+        },
+    )
+
+
+@frappe.whitelist()
+def get_digitax_virtual_amendment_status(invoice_name):
+    digitax_settings = frappe.get_single("Digitax Settings")
+    role = digitax_settings.get("virtual_amendment_role")
+    doc = frappe.get_doc("Sales Invoice", invoice_name)
+
+    can_create = bool(
+        role
+        and _user_has_role(role)
+        and doc.docstatus == 1
+        and not doc.is_return
+        and (doc.custom_sent_to_digitax or doc.custom_sale_id or _find_original_sale_row(doc))
+    )
+
+    state = _get_virtual_amendment_state(doc)
+    return {
+        "can_create": can_create,
+        "role_configured": bool(role),
+        "required_role": role,
+        "can_send_reversal": bool(can_create and state.get("active_sale_id")),
+        "can_send_sale": bool(can_create and state.get("has_reversal_waiting_for_sale")),
+        "active_sale_id": state.get("active_sale_id"),
+        "active_trader_invoice_number": state.get("active_trader_invoice_number"),
+        "next_reversal_trader_invoice_number": state.get("next_reversal_trader_invoice_number"),
+        "next_sale_trader_invoice_number": state.get("next_sale_trader_invoice_number"),
+    }
+
+
+@frappe.whitelist()
+def preview_virtual_digitax_reversal(invoice_name, correction_reason=None):
+    correction_reason = _require_correction_reason(correction_reason)
+    doc, digitax_settings = _load_virtual_amendment_context(invoice_name)
+    state = _get_virtual_amendment_state(doc)
+
+    if not state.get("active_sale_id"):
+        frappe.throw(_("There is no active Digitax sale to reverse. Send the corrected virtual sale first if a reversal was already sent."))
+
+    return _build_virtual_reversal_preview(doc, state, correction_reason)
+
+
+@frappe.whitelist()
+def preview_virtual_digitax_sale(invoice_name, correction_reason=None):
+    correction_reason = _require_correction_reason(correction_reason)
+    doc, digitax_settings = _load_virtual_amendment_context(invoice_name)
+    state = _get_virtual_amendment_state(doc)
+
+    if state.get("active_sale_id"):
+        frappe.throw(_("Send a virtual reversal before sending a corrected virtual sale."))
+
+    return _build_virtual_sale_preview(doc, state, correction_reason)
+
+
+@frappe.whitelist()
+def send_virtual_digitax_reversal(invoice_name, correction_reason=None):
+    correction_reason = _require_correction_reason(correction_reason)
+    logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
+    doc, digitax_settings = _load_virtual_amendment_context(invoice_name)
+    _ensure_original_sale_row(doc)
+    doc.reload()
+    state = _get_virtual_amendment_state(doc)
+
+    if not state.get("active_sale_id"):
+        frappe.throw(_("There is no active Digitax sale to reverse."))
+
+    trader_invoice_number = state["next_reversal_trader_invoice_number"]
+    _throw_if_sent_trader_exists(doc, trader_invoice_number)
+
+    payload = _build_virtual_reversal_payload(doc, digitax_settings, state)
+    preview = _build_virtual_reversal_preview(doc, state, correction_reason)
+    response_data, status_code = _post_virtual_amendment("credit-notes-with-barcode", payload, digitax_settings, logger)
+    success = 200 <= status_code < 300
+
+    row_data = {
+        "amendment_type": "Virtual Credit Note",
+        "trader_invoice_number": trader_invoice_number,
+        "reference_sale_id": state["active_sale_id"],
+        "status": "Sent" if success else "Failed",
+        "amount": abs(doc.grand_total),
+        "correction_reason": correction_reason,
+        "preview_before": _json_dump(preview.get("before")),
+        "preview_after": _json_dump(preview.get("after")),
+        "request_payload": _json_dump(payload),
+        "response_payload": _json_dump(response_data),
+        "error_message": "" if success else response_data.get("message") or response_data.get("error"),
+        "sent_on": now_datetime(),
+        "sent_by": frappe.session.user,
+    }
+    row_data.update(_get_child_response_fields(response_data))
+    row = _append_virtual_amendment_row(doc, row_data)
+
+    if success:
+        _mark_invoice_awaiting_corrected_sale(invoice_name)
+
+    frappe.db.commit()
+    response_data.update({"success": success, "amendment_row": row.name})
+    return response_data
+
+
+@frappe.whitelist()
+def send_virtual_digitax_sale(invoice_name, correction_reason=None):
+    correction_reason = _require_correction_reason(correction_reason)
+    logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
+    doc, digitax_settings = _load_virtual_amendment_context(invoice_name)
+    _ensure_original_sale_row(doc)
+    doc.reload()
+    state = _get_virtual_amendment_state(doc)
+
+    if state.get("active_sale_id"):
+        frappe.throw(_("Send a virtual reversal before sending a corrected virtual sale."))
+
+    trader_invoice_number = state["next_sale_trader_invoice_number"]
+    _throw_if_sent_trader_exists(doc, trader_invoice_number)
+
+    payload = _build_virtual_sale_payload(doc, digitax_settings, state)
+    preview = _build_virtual_sale_preview(doc, state, correction_reason)
+    response_data, status_code = _post_virtual_amendment("sales-with-items", payload, digitax_settings, logger)
+    success = 200 <= status_code < 300
+    customer_pin = resolve_digitax_customer_pin(doc)
+
+    row_data = {
+        "amendment_type": "Virtual Sale",
+        "trader_invoice_number": trader_invoice_number,
+        "status": "Sent" if success else "Failed",
+        "amount": abs(doc.grand_total),
+        "customer_pin_before": doc.tax_id,
+        "customer_pin_after": customer_pin.get("pin"),
+        "customer_pin_source_before": "Sales Invoice" if doc.tax_id else "Not Provided",
+        "customer_pin_source_after": customer_pin.get("source"),
+        "customer_name_before": doc.customer_name,
+        "customer_name_after": doc.customer_name,
+        "correction_reason": correction_reason,
+        "preview_before": _json_dump(preview.get("before")),
+        "preview_after": _json_dump(preview.get("after")),
+        "request_payload": _json_dump(payload),
+        "response_payload": _json_dump(response_data),
+        "error_message": "" if success else response_data.get("message") or response_data.get("error"),
+        "sent_on": now_datetime(),
+        "sent_by": frappe.session.user,
+    }
+    row_data.update(_get_child_response_fields(response_data))
+    row = _append_virtual_amendment_row(doc, row_data)
+
+    if success:
+        _update_invoice_active_digitax_sale(invoice_name, response_data)
+
+    frappe.db.commit()
+    response_data.update({"success": success, "amendment_row": row.name})
     return response_data
 
