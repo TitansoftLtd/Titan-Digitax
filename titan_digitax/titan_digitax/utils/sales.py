@@ -1,8 +1,9 @@
 import frappe
 import json
 import requests
+from datetime import datetime, timezone
 from frappe import _
-from frappe.utils import now_datetime, today
+from frappe.utils import now_datetime
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
 
 
@@ -655,6 +656,11 @@ def _get_default_digitax_item(doc, digitax_settings, include_sale_fields):
     return item
 
 
+def _get_digitax_correction_date():
+    """Use UTC date so correction events are never ahead of Digitax's server date."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
 def _validate_virtual_amendment_user(digitax_settings):
     role = digitax_settings.get("virtual_amendment_role")
     if not role:
@@ -854,7 +860,7 @@ def _build_virtual_reversal_payload(doc, digitax_settings, state):
         "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=False)],
         "invoice_status_code": submitted_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(),
-        "return_date": today(),
+        "return_date": _get_digitax_correction_date(),
         "sale_id": state["active_sale_id"],
     }
 
@@ -873,7 +879,7 @@ def _build_virtual_sale_payload(doc, digitax_settings, state):
         "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=True)],
         "invoice_status_code": submitted_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(),
-        "sale_date": today(),
+        "sale_date": _get_digitax_correction_date(),
         "receipt_type_code": digitax_settings.get("default_receipt_type_code") or "S",
         "payment_type_code": digitax_settings.get("default_payment_type_code") or "01",
     }
