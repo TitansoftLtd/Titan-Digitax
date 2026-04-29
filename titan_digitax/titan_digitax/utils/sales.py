@@ -4,56 +4,6 @@ import requests
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
 
 
-# useful for other scenarios, when we need to append items to payload
-def append_invoice_items_to_payload(doc, payload, is_return, digitax_settings=None):
-    # Get default values from settings or use hardcoded fallbacks
-    if not digitax_settings:
-        digitax_settings = frappe.get_single("Digitax Settings")
-    
-    default_item_class_code = digitax_settings.get("default_item_class_code") or "99020000"
-    default_item_tax_type_code = digitax_settings.get("default_item_tax_type_code") or "D"
-    
-    for item in doc.items:
-        current_item_bar_code = item.item_code
-
-        existing_item = None
-        for existing in payload["items"]:
-            if existing["item_bar_code"] == current_item_bar_code:
-                existing_item = existing
-                break
-
-        current_quantity = abs(item.qty)
-        current_total_amount = abs(item.amount) if item.amount > 0 else 0
-        current_package_unit_quantity = abs(item.qty)
-        current_discount_amount = abs(item.amount) if item.amount < 0 else 0
-
-        if existing_item:
-            existing_item["quantity"] += current_quantity
-            existing_item["total_amount"] += current_total_amount
-            existing_item["package_unit_quantity"] += current_package_unit_quantity
-            existing_item["discount_amount"] += current_discount_amount
-        else:
-            new_item = {
-                "item_bar_code": item.item_code,
-                "quantity": current_quantity,
-                "unit_price": abs(item.rate) if item.rate > 0 else 0,
-                "total_amount": current_total_amount,
-                "package_unit_quantity": current_package_unit_quantity,  # TODO: Confirm with Digitax if this is correct
-                # TODO: Confirm with Digitax if discount_rate is percentage or amount
-                "discount_rate": 1 if abs(item.rate) < 0 else 0,
-                "discount_amount": current_discount_amount,
-                "item_description": item.description,
-            }
-
-            if not is_return:
-                new_item["item_name"] = item.item_name
-                # Use item-specific codes or fall back to defaults from Digitax Settings
-                new_item["item_class_code"] = item.custom_item_class_code or default_item_class_code
-                new_item["item_tax_type_code"] = item.custom_tax_type_code or default_item_tax_type_code
-                new_item["is_stockable"] = True if item.custom_is_stockable else False
-
-            payload["items"].append(new_item)
-
 @frappe.whitelist()
 def send_sales_invoice_to_digitax(docname):
     if not frappe.conf.get("sync_with_digitax"):
@@ -62,15 +12,13 @@ def send_sales_invoice_to_digitax(docname):
             "reason": "Digitax sync is disabled in site configuration",
             "message": "To enable, set 'sync_with_digitax: true' in common_site_config.json"
         }
-    
-    doc = frappe.get_doc("Sales Invoice", docname)
-    # Create a dedicated logger for Digitax operations
+
     logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
-    
+
     logger.info(f"=" * 80)
     logger.info(f"DIGITAX SEND: Starting process for Sales Invoice: {docname}")
     logger.info(f"=" * 80)
-    
+
     try:
         doc = frappe.get_doc("Sales Invoice", docname)
         logger.info(f"Invoice Details: Company={doc.company}, Grand Total={doc.grand_total}, Is Return={doc.is_return}, Docstatus={doc.docstatus}")
@@ -171,9 +119,6 @@ def send_sales_invoice_to_digitax(docname):
             frappe.msgprint(f"Original sale not found in Digitax. Cannot process credit note for {doc.name}.")
             return
 
-    # append_invoice_items_to_payload(doc, payload, doc.is_return)
-
-    # Breaburn specific: Add School Fees as a single item
     # For credit notes, grand_total is negative, so we use abs() to get positive value
     amount = abs(doc.grand_total)
     logger.info(f"Calculated amount: {amount} (Original grand_total: {doc.grand_total})")
@@ -376,7 +321,6 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
         "docstatus": 1,
         "custom_sent_to_digitax": 0,
         "company": ["in", valid_companies],
-        "custom_sent_to_digitax": 0,
         "custom_retry_count": ["<", retry_count],
     }
     if invoice_name:
