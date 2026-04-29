@@ -88,12 +88,13 @@ def send_sales_invoice_to_digitax(docname):
         "trader_invoice_number": str(doc.custom_trader_invoice_number or (doc.name.replace("/", "_") if doc.name else "")),
         "items": [],
         "invoice_status_code": submitted_status if doc.docstatus == 1 else cancelled_status,
-        "customer_name": str(doc.customer_name),
         "callback_url": get_digitax_callback_url_for_sales_with_items(),
     }
 
+    # Only add customer_tin and customer_name if tax_id is present
     if doc.tax_id:
         payload["customer_tin"] = str(doc.tax_id)
+        payload["customer_name"]= str(doc.customer_name)
 
     if not doc.is_return:
         url = f"{digitax_base_url.rstrip('/')}/sales-with-items"
