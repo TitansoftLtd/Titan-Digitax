@@ -14,6 +14,8 @@
   "api_request_timeout",
   "max_retry_attempts",
   "background_job_timeout",
+  "virtual_amendments_section",
+  "virtual_amendment_role",
   "default_item_settings_section",
   "default_item_class_code",
   "column_break_items",
@@ -90,6 +92,18 @@
    "fieldname": "background_job_timeout",
    "fieldtype": "Int",
    "label": "Background Job Timeout (seconds)"
+  },
+  {
+   "fieldname": "virtual_amendments_section",
+   "fieldtype": "Section Break",
+   "label": "Virtual Amendments"
+  },
+  {
+   "description": "Only users with this role can preview and send Digitax virtual amendments.",
+   "fieldname": "virtual_amendment_role",
+   "fieldtype": "Link",
+   "label": "Virtual Amendment Role",
+   "options": "Role"
   },
   {
    "fieldname": "invoice_status_codes_section",

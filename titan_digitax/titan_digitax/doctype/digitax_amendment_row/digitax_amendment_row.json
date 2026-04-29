@@ -1,0 +1,255 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-04-29 23:22:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "amendment_type",
+  "trader_invoice_number",
+  "status",
+  "correction_reason",
+  "column_break_status",
+  "reference_sale_id",
+  "digitax_sale_id",
+  "digitax_status",
+  "amount",
+  "digitax_response_section",
+  "offline_url",
+  "etims_url",
+  "sale_detail_url",
+  "column_break_response",
+  "serial_number",
+  "invoice_number",
+  "receipt_type_code",
+  "original_sale_id",
+  "digitax_date",
+  "digitax_time",
+  "preview_section",
+  "customer_pin_before",
+  "customer_pin_after",
+  "customer_pin_source_before",
+  "customer_pin_source_after",
+  "customer_name_before",
+  "customer_name_after",
+  "preview_before",
+  "preview_after",
+  "audit_section",
+  "request_payload",
+  "response_payload",
+  "error_message",
+  "sent_on",
+  "sent_by",
+  "retry_of"
+ ],
+ "fields": [
+  {
+   "fieldname": "amendment_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Amendment Type",
+   "options": "\nOriginal Sale\nVirtual Credit Note\nVirtual Sale",
+   "reqd": 1
+  },
+  {
+   "fieldname": "trader_invoice_number",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Trader Invoice Number",
+   "reqd": 1
+  },
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Draft\nSent\nFailed",
+   "reqd": 1
+  },
+  {
+   "fieldname": "correction_reason",
+   "fieldtype": "Small Text",
+   "label": "Correction Reason"
+  },
+  {
+   "fieldname": "column_break_status",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "reference_sale_id",
+   "fieldtype": "Data",
+   "label": "Reference Sale ID"
+  },
+  {
+   "fieldname": "digitax_sale_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Digitax Sale ID"
+  },
+  {
+   "fieldname": "digitax_status",
+   "fieldtype": "Data",
+   "label": "Digitax Status"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Amount"
+  },
+  {
+   "fieldname": "digitax_response_section",
+   "fieldtype": "Section Break",
+   "label": "Digitax Response"
+  },
+  {
+   "fieldname": "offline_url",
+   "fieldtype": "Data",
+   "label": "Offline URL",
+   "options": "URL"
+  },
+  {
+   "fieldname": "etims_url",
+   "fieldtype": "Data",
+   "label": "eTIMS URL",
+   "options": "URL"
+  },
+  {
+   "fieldname": "sale_detail_url",
+   "fieldtype": "Data",
+   "label": "Sale Detail URL",
+   "options": "URL"
+  },
+  {
+   "fieldname": "column_break_response",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "serial_number",
+   "fieldtype": "Data",
+   "label": "Serial Number"
+  },
+  {
+   "fieldname": "invoice_number",
+   "fieldtype": "Data",
+   "label": "CU/Invoice Number"
+  },
+  {
+   "fieldname": "receipt_type_code",
+   "fieldtype": "Data",
+   "label": "Receipt Type Code"
+  },
+  {
+   "fieldname": "original_sale_id",
+   "fieldtype": "Data",
+   "label": "Original Sale ID"
+  },
+  {
+   "fieldname": "digitax_date",
+   "fieldtype": "Data",
+   "label": "Digitax Date"
+  },
+  {
+   "fieldname": "digitax_time",
+   "fieldtype": "Data",
+   "label": "Digitax Time"
+  },
+  {
+   "fieldname": "preview_section",
+   "fieldtype": "Section Break",
+   "label": "Preview"
+  },
+  {
+   "fieldname": "customer_pin_before",
+   "fieldtype": "Data",
+   "label": "Customer PIN Before"
+  },
+  {
+   "fieldname": "customer_pin_after",
+   "fieldtype": "Data",
+   "label": "Customer PIN After"
+  },
+  {
+   "fieldname": "customer_pin_source_before",
+   "fieldtype": "Data",
+   "label": "Customer PIN Source Before"
+  },
+  {
+   "fieldname": "customer_pin_source_after",
+   "fieldtype": "Data",
+   "label": "Customer PIN Source After"
+  },
+  {
+   "fieldname": "customer_name_before",
+   "fieldtype": "Data",
+   "label": "Customer Name Before"
+  },
+  {
+   "fieldname": "customer_name_after",
+   "fieldtype": "Data",
+   "label": "Customer Name After"
+  },
+  {
+   "fieldname": "preview_before",
+   "fieldtype": "Long Text",
+   "label": "Preview Before"
+  },
+  {
+   "fieldname": "preview_after",
+   "fieldtype": "Long Text",
+   "label": "Preview After"
+  },
+  {
+   "fieldname": "audit_section",
+   "fieldtype": "Section Break",
+   "label": "Audit"
+  },
+  {
+   "fieldname": "request_payload",
+   "fieldtype": "Code",
+   "label": "Request Payload",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "response_payload",
+   "fieldtype": "Code",
+   "label": "Response Payload",
+   "options": "JSON"
+  },
+  {
+   "fieldname": "error_message",
+   "fieldtype": "Small Text",
+   "label": "Error Message"
+  },
+  {
+   "fieldname": "sent_on",
+   "fieldtype": "Datetime",
+   "label": "Sent On"
+  },
+  {
+   "fieldname": "sent_by",
+   "fieldtype": "Link",
+   "label": "Sent By",
+   "options": "User"
+  },
+  {
+   "fieldname": "retry_of",
+   "fieldtype": "Data",
+   "label": "Retry Of"
+  }
+ ],
+ "grid_page_length": 50,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-04-29 23:22:00.000000",
+ "modified_by": "Administrator",
+ "module": "Titan Digitax",
+ "name": "Digitax Amendment Row",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

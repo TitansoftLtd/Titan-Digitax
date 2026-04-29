@@ -3,6 +3,7 @@ frappe.ui.form.on("Sales Invoice", {
 		// Show button for all submitted invoices (duplicate handling is done on backend)
 		if (frm.doc.docstatus === 1) {
 			add_send_to_digitax_button(frm);
+			add_virtual_amendment_buttons(frm);
 		}
 	},
 });
@@ -130,4 +131,192 @@ const add_send_to_digitax_button = (frm) => {
 			},
 		});
 	}, __("Digitax Actions"));
+};
+
+const add_virtual_amendment_buttons = (frm) => {
+	if (frm.doc.is_return || !frm.doc.custom_sent_to_digitax) {
+		return;
+	}
+
+	frappe.call({
+		method: "titan_digitax.titan_digitax.utils.sales.get_digitax_virtual_amendment_status",
+		args: {
+			invoice_name: frm.doc.name,
+		},
+		callback: function (r) {
+			const status = r.message || {};
+			if (!status.can_create) {
+				return;
+			}
+
+			if (status.can_send_reversal) {
+				frm.add_custom_button(__("Send Virtual Reversal"), function () {
+					prompt_virtual_amendment_reason(frm, "reversal");
+				}, __("Digitax Actions"));
+			}
+
+			if (status.can_send_sale) {
+				frm.add_custom_button(__("Send Corrected Virtual Sale"), function () {
+					prompt_virtual_amendment_reason(frm, "sale");
+				}, __("Digitax Actions"));
+			}
+		},
+	});
+};
+
+const prompt_virtual_amendment_reason = (frm, action) => {
+	const dialog = new frappe.ui.Dialog({
+		title: __("Digitax Virtual Amendment Reason"),
+		fields: [
+			{
+				fieldname: "correction_reason",
+				fieldtype: "Small Text",
+				label: __("Correction Reason"),
+				reqd: 1,
+				description: __("Example: Missing Customer PIN, wrong Customer PIN, or corrected customer details."),
+			},
+		],
+		primary_action_label: __("Preview"),
+		primary_action(values) {
+			dialog.hide();
+			preview_virtual_amendment(frm, action, values.correction_reason);
+		},
+	});
+
+	dialog.show();
+};
+
+const preview_virtual_amendment = (frm, action, correction_reason) => {
+	const preview_method = action === "reversal"
+		? "titan_digitax.titan_digitax.utils.sales.preview_virtual_digitax_reversal"
+		: "titan_digitax.titan_digitax.utils.sales.preview_virtual_digitax_sale";
+
+	frappe.call({
+		method: preview_method,
+		args: {
+			invoice_name: frm.doc.name,
+			correction_reason,
+		},
+		freeze: true,
+		freeze_message: __("Preparing Digitax amendment preview..."),
+		callback: function (r) {
+			if (!r.message) {
+				return;
+			}
+
+			show_virtual_amendment_preview(frm, action, correction_reason, r.message);
+		},
+	});
+};
+
+const show_virtual_amendment_preview = (frm, action, correction_reason, preview) => {
+	const dialog = new frappe.ui.Dialog({
+		title: __(preview.action || "Digitax Virtual Amendment"),
+		size: "large",
+		fields: [
+			{
+				fieldname: "preview_html",
+				fieldtype: "HTML",
+				options: build_preview_html(preview),
+			},
+		],
+		primary_action_label: __("Confirm Send"),
+		primary_action() {
+			dialog.hide();
+			send_virtual_amendment(frm, action, correction_reason);
+		},
+		secondary_action_label: __("Cancel"),
+		secondary_action() {
+			dialog.hide();
+		},
+	});
+
+	dialog.show();
+};
+
+const send_virtual_amendment = (frm, action, correction_reason) => {
+	const send_method = action === "reversal"
+		? "titan_digitax.titan_digitax.utils.sales.send_virtual_digitax_reversal"
+		: "titan_digitax.titan_digitax.utils.sales.send_virtual_digitax_sale";
+
+	frappe.call({
+		method: send_method,
+		args: {
+			invoice_name: frm.doc.name,
+			correction_reason,
+		},
+		freeze: true,
+		freeze_message: __("Sending Digitax virtual amendment..."),
+		callback: function (r) {
+			const response = r.message || {};
+			if (response.success) {
+				frappe.msgprint({
+					title: __("Digitax Amendment Sent"),
+					message: __("Digitax amendment sent successfully.<br><br>Sale ID: {0}<br>Status: {1}", [
+						response.id || "",
+						response.status || "Sent",
+					]),
+					indicator: "green",
+				});
+			} else {
+				frappe.msgprint({
+					title: __("Digitax Amendment Failed"),
+					message: __(response.message || response.error || "Digitax amendment failed. Check the amendment row for details."),
+					indicator: "red",
+				});
+			}
+
+			frm.reload_doc();
+		},
+	});
+};
+
+const build_preview_html = (preview) => {
+	const before = preview.before || {};
+	const after = preview.after || {};
+	const keys = Array.from(new Set(Object.keys(before).concat(Object.keys(after))));
+	const rows = keys.map((key) => {
+		return `
+			<tr>
+				<td>${escape_html(key)}</td>
+				<td>${escape_html(before[key] || "")}</td>
+				<td>${escape_html(after[key] || "")}</td>
+			</tr>
+		`;
+	}).join("");
+
+	return `
+		<div class="digitax-amendment-preview">
+			<p><strong>${__("Invoice")}:</strong> ${escape_html(preview.invoice_name || "")}</p>
+			<p><strong>${__("Customer")}:</strong> ${escape_html(preview.customer || "")}</p>
+			<p><strong>${__("New Trader Invoice No.")}:</strong> ${escape_html(preview.trader_invoice_number || "")}</p>
+			<p><strong>${__("Correction Reason")}:</strong> ${escape_html(preview.correction_reason || "")}</p>
+			<table class="table table-bordered">
+				<thead>
+					<tr>
+						<th>${__("Field")}</th>
+						<th>${__("Before")}</th>
+						<th>${__("After")}</th>
+					</tr>
+				</thead>
+				<tbody>${rows}</tbody>
+			</table>
+			<div class="alert alert-warning">
+				${escape_html(preview.warning || "")}
+			</div>
+		</div>
+	`;
+};
+
+const escape_html = (value) => {
+	if (value === null || value === undefined) {
+		return "";
+	}
+
+	return String(value)
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#039;");
 };
