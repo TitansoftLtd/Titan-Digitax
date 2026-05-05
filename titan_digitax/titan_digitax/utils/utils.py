@@ -1,5 +1,4 @@
 import frappe
-import json
 from frappe.utils.password import get_decrypted_password
 
 def get_digitax_credentials():
@@ -40,15 +39,67 @@ def digitax_callback_sales_with_items():
                 "message": "Missing trader_invoice_number or sale_id"
             }
 
-        doc = frappe.get_doc(
-            "Sales Invoice", {"custom_trader_invoice_number": trader_invoice_number}
-        ) or frappe.get_doc("Sales Invoice", trader_invoice_number)
-        doc.custom_digitax_status = status
-        doc.custom_etims_url = etims_url
-        doc.custom_sale_id = sale_id
-        doc.add_comment("Comment", f"Digitax Callback received. Status: {status}, ETIMS URL: {etims_url}")
-        doc.save(ignore_permissions=True)
-        frappe.db.commit()
+        invoice_name = frappe.db.get_value(
+            "Sales Invoice",
+            {"custom_trader_invoice_number": trader_invoice_number},
+            "name",
+        ) or (trader_invoice_number if frappe.db.exists("Sales Invoice", trader_invoice_number) else None)
+
+        if invoice_name:
+            doc = frappe.get_doc("Sales Invoice", invoice_name)
+            doc.custom_digitax_status = status
+            doc.custom_etims_url = etims_url
+            doc.custom_sale_id = sale_id
+            doc.add_comment("Comment", f"Digitax Callback received. Status: {status}, ETIMS URL: {etims_url}")
+            doc.save(ignore_permissions=True)
+            frappe.db.commit()
+            return {"status": "success"}
+
+        try:
+            amendment_row = frappe.db.get_value(
+                "Digitax Amendment Row",
+                {"trader_invoice_number": trader_invoice_number},
+                ["name", "parent", "amendment_type"],
+                as_dict=True,
+            )
+        except Exception:
+            amendment_row = None
+
+        if amendment_row:
+            frappe.db.set_value(
+                "Digitax Amendment Row",
+                amendment_row.name,
+                {
+                    "digitax_status": status,
+                    "etims_url": etims_url,
+                    "digitax_sale_id": sale_id,
+                },
+                update_modified=False,
+            )
+
+            if amendment_row.amendment_type == "Virtual Sale":
+                frappe.db.set_value(
+                    "Sales Invoice",
+                    amendment_row.parent,
+                    {
+                        "custom_digitax_status": status,
+                        "custom_etims_url": etims_url,
+                        "custom_sale_id": sale_id,
+                    },
+                    update_modified=False,
+                )
+
+            frappe.db.commit()
+            return {"status": "success"}
+
+        frappe.log_error(
+            title="Digitax Callback Error",
+            message=f"No Sales Invoice or Digitax Amendment Row found for trader_invoice_number {trader_invoice_number}"
+        )
+        return {
+            "status": "error",
+            "message": "Document not found for trader_invoice_number"
+        }
 
     except Exception as e:
         frappe.log_error(
