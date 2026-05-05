@@ -64,25 +64,7 @@ def send_sales_invoice_to_digitax(docname):
         logger.info(f"Retry detected: Current retry count = {current_retry_count}")
         frappe.db.set_value("Sales Invoice", doc.name, "custom_retry_count", current_retry_count + 1, update_modified=False)
 
-    digitax_base_url, digitax_api_key = get_digitax_credentials()
-    logger.info(f"Digitax Base URL: {digitax_base_url}")
-    logger.info(f"API Key configured: {'Yes' if digitax_api_key else 'No'}")
-    
-    # Get API timeout from settings (ensure it's an int and positive)
-    try:
-        api_timeout = int(digitax_settings.get("api_request_timeout") or 30)
-        if api_timeout <= 0:
-            api_timeout = 30  # Fallback to default if invalid
-    except (ValueError, TypeError):
-        api_timeout = 30  # Fallback if conversion fails
-    logger.info(f"API Request Timeout: {api_timeout} seconds")
-    
-    headers = {
-        "accept": "application/json",
-        "X-API-Key": digitax_api_key,
-        "content-type": "application/json",
-    }
-    url = ""
+    endpoint = ""
     # Get invoice status codes from settings
     submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
     cancelled_status = digitax_settings.get("cancelled_invoice_status_code") or "04"
@@ -100,13 +82,13 @@ def send_sales_invoice_to_digitax(docname):
         payload["customer_name"]= str(doc.customer_name)
 
     if not doc.is_return:
-        url = f"{digitax_base_url.rstrip('/')}/sales-with-items"
+        endpoint = "sales-with-items"
         payload["sale_date"] = str(doc.posting_date)
         payload["receipt_type_code"] = digitax_settings.get("default_receipt_type_code") or "S"
         payload["payment_type_code"] = digitax_settings.get("default_payment_type_code") or "01"
         logger.info(f"Invoice Type: Regular Sales Invoice")
     else:
-        url = f"{digitax_base_url.rstrip('/')}/credit-notes-with-barcode"
+        endpoint = "credit-notes-with-barcode"
         payload["return_date"] = str(doc.posting_date)
         payload["sale_id"] = frappe.db.get_value("Sales Invoice", doc.return_against, "custom_sale_id")
         logger.info(f"Invoice Type: Credit Note (Return against: {doc.return_against})")
@@ -153,158 +135,75 @@ def send_sales_invoice_to_digitax(docname):
     payload["items"].append(new_item)
     logger.info(f"Item added to payload: {new_item}")
 
-    payload = json.dumps(payload)
-    frappe.utils.logger.set_log_level("INFO")
-    payload_logger = frappe.logger("digitax_payloads", allow_site=True, file_count=10)
-    payload_logger.info(f"Payload for Sales Invoice {doc.name}:\n{json.dumps(json.loads(payload), indent=2)}")
-    logger.info(f"Final API URL: {url}")
-    logger.info(f"Payload: {payload}")
+    response_data, status_code = _post_to_digitax(endpoint, payload, digitax_settings, logger)
 
-    try:
-        logger.info(f"Sending POST request to Digitax API...")
-        response = requests.post(url, headers=headers, data=payload, timeout=api_timeout)
-        logger.info(f"Response Status Code: {response.status_code}")
-        
-        try:
-            response_data = response.json()
-            logger.info(f"Response Data: {json.dumps(response_data, indent=2)}")
-        except Exception as json_error:
-            logger.error(f"Failed to parse JSON response: {str(json_error)}")
-            logger.error(f"Raw Response: {response.text}")
-            response_data = {"error": "Invalid JSON response", "raw": response.text}
-        
-        if response.status_code >= 200 and response.status_code < 300:
-            logger.info(f"SUCCESS: Invoice sent successfully to Digitax")
-            logger.info(f"Sale ID: {response_data.get('id')}, Status: {response_data.get('status')}")
-            
-            frappe.db.set_value(
-                "Sales Invoice",
-                doc.name,
-                {
-                    "custom_offline_url": response_data.get("offline_url", ""),
-                    "custom_sale_detail_url": response_data.get("sale_detail_url", ""),
-                    "custom_serial_number": response_data.get("serial_number", ""),
-                    "custom_invoice_number": response_data.get("invoice_number", ""),
-                    "custom_digitax_status": response_data.get("status", ""),
-                    "custom_sale_id": response_data.get("id", ""),
-                    "custom_date": response_data.get("date", ""),
-                    "custom_time": response_data.get("time", ""),
-                    "custom_receipt_type_code": response_data.get("receipt_type_code", ""),
-                    "custom_original_sale_id": response_data.get("original_sale_id", ""),
-                    "custom_sent_to_digitax": 1,
-                },
-                update_modified=False
-            )
-            logger.info(f"Invoice fields updated in ERPNext")
-        elif response.status_code == 409:
-            # 409 Conflict - Check if it's a duplicate trader_invoice_number
-            error_message = response_data.get("message", "").lower()
-            logger.info(f"409 Conflict received. Message: {response_data.get('message', '')}")
-            
-            # Check if message indicates duplicate trader_invoice_number
-            is_duplicate = "trader_invoice_number has already been used" in error_message
-            
-            if is_duplicate:
-                # Invoice already exists in Digitax - treat as success
-                logger.info(f"DUPLICATE DETECTED: Invoice already exists in Digitax (409)")
-                
-                # Extract existing sale_id from metadata (if available)
-                metadata = response_data.get("metadata", {})
-                existing_sale_id = metadata.get("existing_sale_id", "")
-                trader_invoice_number = metadata.get("trader_invoice_number", "")
-                
-                logger.info(f"Existing Sale ID: {existing_sale_id}, Trader Invoice Number: {trader_invoice_number}")
-                
-                # Update invoice with existing Digitax sale details
-                response_data = update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger)
-            else:
-                # 409 for a different reason - treat as error
-                logger.error(f"409 Conflict (NOT duplicate): {response_data.get('message', 'Unknown conflict')}")
-                frappe.db.set_value(
-                    "Sales Invoice",
-                    doc.name,
-                    "custom_error_message",
-                    response_data.get("message", "Conflict error (409)"),
-                    update_modified=False
-                )
-                logger.info(f"Error message saved to invoice")
+    if status_code == 0:
+        error_msg = response_data.get("message", "Connection error sending to Digitax")
+        frappe.db.set_value(
+            "Sales Invoice", doc.name, "custom_error_message", error_msg, update_modified=False
+        )
+        frappe.log_error(
+            message=f"Connection error sending Sales Invoice {doc.name} to Digitax: {error_msg}",
+            title="Digitax Send Error",
+        )
+    elif 200 <= status_code < 300:
+        logger.info(f"SUCCESS: Invoice sent successfully to Digitax")
+        logger.info(f"Sale ID: {response_data.get('id')}, Status: {response_data.get('status')}")
+
+        frappe.db.set_value(
+            "Sales Invoice",
+            doc.name,
+            {
+                "custom_offline_url": response_data.get("offline_url", ""),
+                "custom_sale_detail_url": response_data.get("sale_detail_url", ""),
+                "custom_serial_number": response_data.get("serial_number", ""),
+                "custom_invoice_number": response_data.get("invoice_number", ""),
+                "custom_digitax_status": response_data.get("status", ""),
+                "custom_sale_id": response_data.get("id", ""),
+                "custom_date": response_data.get("date", ""),
+                "custom_time": response_data.get("time", ""),
+                "custom_receipt_type_code": response_data.get("receipt_type_code", ""),
+                "custom_original_sale_id": response_data.get("original_sale_id", ""),
+                "custom_sent_to_digitax": 1,
+            },
+            update_modified=False,
+        )
+        logger.info(f"Invoice fields updated in ERPNext")
+    elif status_code == 409:
+        error_message = response_data.get("message", "").lower()
+        logger.info(f"409 Conflict received. Message: {response_data.get('message', '')}")
+        is_duplicate = "trader_invoice_number has already been used" in error_message
+
+        if is_duplicate:
+            logger.info(f"DUPLICATE DETECTED: Invoice already exists in Digitax (409)")
+            metadata = response_data.get("metadata", {})
+            existing_sale_id = metadata.get("existing_sale_id", "")
+            trader_invoice_number = metadata.get("trader_invoice_number", "")
+            logger.info(f"Existing Sale ID: {existing_sale_id}, Trader Invoice Number: {trader_invoice_number}")
+            response_data = update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger)
         else:
-            error_msg = response_data.get("message", "Unknown error")
-            logger.error(f"API ERROR: Status {response.status_code}, Message: {error_msg}")
-            
+            logger.error(f"409 Conflict (NOT duplicate): {response_data.get('message', 'Unknown conflict')}")
             frappe.db.set_value(
                 "Sales Invoice",
                 doc.name,
                 "custom_error_message",
-                error_msg,
-                update_modified=False
+                response_data.get("message", "Conflict error (409)"),
+                update_modified=False,
             )
             logger.info(f"Error message saved to invoice")
-        
-        # Only raise for status codes that are actual errors (not 409 which we treat as success)
-        if response.status_code >= 400 and response.status_code != 409:
-            response.raise_for_status()
-        
-        logger.info(f"Request completed successfully")
-        
-    except requests.exceptions.Timeout as e:
-        logger.error(f"TIMEOUT ERROR: Request timed out after {api_timeout} seconds")
-        error_msg = f"Request timeout - Digitax API did not respond within {api_timeout} seconds"
+    else:
+        error_msg = response_data.get("message", "Unknown error")
+        logger.error(f"API ERROR: Status {status_code}, Message: {error_msg}")
         frappe.db.set_value(
-            "Sales Invoice",
-            doc.name,
-            "custom_error_message",
-            error_msg,
-            update_modified=False
+            "Sales Invoice", doc.name, "custom_error_message", error_msg, update_modified=False
         )
-        response_data = {"error": "timeout", "message": error_msg}
-        frappe.log_error(
-            message=f"Timeout while sending Sales Invoice {doc.name} to Digitax",
-            title="Digitax Timeout Error",
-        )
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"REQUEST ERROR: {str(e)}")
-        error_msg = f"Request failed: {str(e)}"
-        frappe.db.set_value(
-            "Sales Invoice",
-            doc.name,
-            "custom_error_message",
-            error_msg,
-            update_modified=False
-        )
-        response_data = {"error": "request_failed", "message": error_msg}
-        frappe.log_error(
-            message=f"Request error while sending Sales Invoice {doc.name} to Digitax: {str(e)}",
-            title="Digitax Request Error",
-        )
-        
-    except Exception as e:
-        logger.error(f"UNEXPECTED ERROR: {str(e)}")
-        logger.error(f"Error Type: {type(e).__name__}")
-        
-        error_msg = str(e) if 'response_data' not in locals() else str(response_data)
-        frappe.db.set_value(
-            "Sales Invoice",
-            doc.name,
-            "custom_error_message",
-            error_msg,
-            update_modified=False
-        )
-        
-        if 'response_data' not in locals():
-            response_data = {"error": "exception", "message": str(e)}
-            
-        frappe.log_error(
-            message=f"Error while sending Sales Invoice {doc.name} to Digitax: {error_msg}",
-            title="Digitax Sales Invoice Sync Error",
-        )
-    finally:
-        frappe.db.commit()
-        logger.info(f"=" * 80)
-        logger.info(f"DIGITAX SEND: Process completed for {docname}")
-        logger.info(f"=" * 80)
-        return response_data
+        logger.info(f"Error message saved to invoice")
+
+    frappe.db.commit()
+    logger.info(f"=" * 80)
+    logger.info(f"DIGITAX SEND: Process completed for {docname}")
+    logger.info(f"=" * 80)
+    return response_data
 
 @frappe.whitelist()
 def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from_date=None, to_date=None, retry_count=None):
@@ -661,6 +560,78 @@ def _get_digitax_correction_date():
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _post_to_digitax(endpoint, payload, digitax_settings, logger=None):
+    """
+    Shared low-level HTTP POST to Digitax.
+
+    Returns (response_data, status_code).
+    status_code == 0 signals a network/connection failure; all other values
+    are real HTTP status codes from the Digitax server.
+    """
+    digitax_base_url, headers = _get_digitax_headers()
+    if not digitax_base_url:
+        error = {"error": "configuration", "message": "Digitax Base URL is not configured."}
+        if logger:
+            logger.error("Digitax Base URL is not configured.")
+        return error, 0
+
+    api_timeout = _get_api_timeout(digitax_settings)
+    full_url = f"{digitax_base_url.rstrip('/')}/{endpoint.lstrip('/')}"
+    serialized = json.dumps(payload)
+
+    payload_logger = frappe.logger("digitax_payloads", allow_site=True, file_count=10)
+    payload_logger.info(f"POST {full_url}\n{json.dumps(payload, indent=2)}")
+
+    if logger:
+        logger.info(f"Digitax Base URL: {digitax_base_url}")
+        logger.info(f"API Request Timeout: {api_timeout} seconds")
+        logger.info(f"Sending POST to Digitax: {full_url}")
+        logger.info(f"Payload: {serialized}")
+
+    try:
+
+        response = requests.post(full_url, headers=headers, data=serialized, timeout=api_timeout)
+
+        if logger:
+            logger.info(f"Response Status Code: {response.status_code}")
+
+        try:
+            response_data = response.json()
+            if logger:
+                logger.info(f"Response Data: {json.dumps(response_data, indent=2)}")
+        except Exception as json_error:
+            if logger:
+                logger.error(f"Failed to parse JSON response: {str(json_error)}")
+                logger.error(f"Raw Response: {response.text}")
+            response_data = {"error": "Invalid JSON response", "raw": response.text}
+
+        return response_data, response.status_code
+
+    except requests.exceptions.Timeout:
+        error_msg = f"Request timeout - Digitax API did not respond within {api_timeout} seconds"
+        if logger:
+            logger.error(f"TIMEOUT ERROR: {error_msg}")
+        frappe.log_error(message=error_msg, title="Digitax Timeout Error")
+        return {"error": "timeout", "message": error_msg}, 0
+
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Request failed: {str(e)}"
+        if logger:
+            logger.error(f"REQUEST ERROR: {str(e)}")
+        frappe.log_error(message=error_msg, title="Digitax Request Error")
+        return {"error": "request_failed", "message": error_msg}, 0
+
+    except Exception as e:
+        error_msg = str(e)
+        if logger:
+            logger.error(f"UNEXPECTED ERROR: {type(e).__name__}: {error_msg}")
+        frappe.log_error(
+            message=f"Unexpected error posting to Digitax: {error_msg}",
+            title="Digitax Error",
+        )
+        return {"error": "exception", "message": error_msg}, 0
+
+
 def _validate_virtual_amendment_user(digitax_settings):
     role = digitax_settings.get("virtual_amendment_role")
     if not role:
@@ -893,24 +864,13 @@ def _build_virtual_sale_payload(doc, digitax_settings, state):
 
 
 def _post_virtual_amendment(url, payload, digitax_settings, logger):
-    digitax_base_url, headers = _get_digitax_headers()
-    if not digitax_base_url:
-        frappe.throw(_("Digitax Base URL is not configured."))
+    response_data, status_code = _post_to_digitax(url, payload, digitax_settings, logger)
 
-    api_timeout = _get_api_timeout(digitax_settings)
-    response = requests.post(
-        f"{digitax_base_url.rstrip('/')}/{url.lstrip('/')}",
-        headers=headers,
-        data=json.dumps(payload),
-        timeout=api_timeout,
-    )
+    if status_code == 0:
+        logger.error(f"Digitax virtual amendment network failure: {response_data}")
+        return response_data, 0
 
-    try:
-        response_data = response.json()
-    except Exception:
-        response_data = {"error": "Invalid JSON response", "raw": response.text}
-
-    if response.status_code == 409 and "trader_invoice_number has already been used" in (response_data.get("message", "").lower()):
+    if status_code == 409 and "trader_invoice_number has already been used" in (response_data.get("message", "").lower()):
         existing_sale_id = (response_data.get("metadata") or {}).get("existing_sale_id", "")
         if existing_sale_id:
             sale_details = fetch_sale_details_from_digitax(existing_sale_id)
@@ -923,10 +883,10 @@ def _post_virtual_amendment(url, payload, digitax_settings, logger):
         response_data["status"] = "Already Exists"
         return response_data, 200
 
-    if response.status_code >= 400:
-        logger.error(f"Digitax virtual amendment failed: {response.status_code} {response_data}")
+    if status_code >= 400:
+        logger.error(f"Digitax virtual amendment failed: {status_code} {response_data}")
 
-    return response_data, response.status_code
+    return response_data, status_code
 
 
 def _append_virtual_amendment_row(doc, row_data):
