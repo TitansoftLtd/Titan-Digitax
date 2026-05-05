@@ -589,7 +589,6 @@ def _post_to_digitax(endpoint, payload, digitax_settings, logger=None):
         logger.info(f"Payload: {serialized}")
 
     try:
-
         response = requests.post(full_url, headers=headers, data=serialized, timeout=api_timeout)
 
         if logger:
