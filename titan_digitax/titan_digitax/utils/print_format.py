@@ -1,0 +1,240 @@
+import frappe
+from frappe.utils import fmt_money, get_url
+
+from titan_digitax.titan_digitax.utils.sales import (
+	_get_default_digitax_item,
+	_get_trader_invoice_base,
+	resolve_digitax_customer_pin,
+)
+
+TAX_CLASS_LABELS = {
+	"A": "Tax ClassA(EX)",
+	"B": "Tax ClassB(16%)",
+	"C": "Tax ClassC(0)",
+	"D": "Tax ClassD(Non-VAT)",
+	"E": "Tax ClassE(8%)",
+}
+
+TAX_CLASS_RATES = {
+	"A": 0,
+	"B": 16,
+	"C": 0,
+	"D": 0,
+	"E": 8,
+}
+
+DEFAULT_LOGO_URL = "http://mamba.braeburn.com/files/Braeburn%20Logo.svg"
+
+
+def get_qr_code_data_uri(text):
+	"""Return a PNG data URI for embedding a QR code in print formats."""
+	if not text:
+		return ""
+
+	from base64 import b64encode
+	from io import BytesIO
+
+	from pyqrcode import create as qrcreate
+
+	stream = BytesIO()
+	try:
+		qrcreate(str(text)).png(stream, scale=5, quiet_zone=2)
+		encoded = b64encode(stream.getvalue()).decode()
+	finally:
+		stream.close()
+
+	return f"data:image/png;base64,{encoded}"
+
+
+def get_digitax_tax_breakdown(tax_type_code, amount):
+	"""Build the five tax-class rows shown on Digitax receipts."""
+	tax_type_code = (tax_type_code or "D").upper()
+	amount = abs(float(amount or 0))
+	rows = []
+
+	for code in ("A", "B", "C", "D", "E"):
+		rate = TAX_CLASS_RATES[code]
+		if code == tax_type_code:
+			taxable_amount = amount
+			tax_amount = round(amount * rate / 100, 2) if rate else 0
+		else:
+			taxable_amount = 0
+			tax_amount = 0
+
+		rows.append(
+			{
+				"code": code,
+				"label": TAX_CLASS_LABELS[code],
+				"taxable_amount": taxable_amount,
+				"tax_rate": rate,
+				"tax_amount": tax_amount,
+			}
+		)
+
+	return rows
+
+
+def get_digitax_print_item(doc, digitax_settings=None):
+	"""Return the consolidated Digitax item line for print display."""
+	digitax_settings = digitax_settings or frappe.get_single("Digitax Settings")
+	include_sale_fields = not doc.is_return
+	item = _get_default_digitax_item(doc, digitax_settings, include_sale_fields)
+	currency = doc.currency or frappe.db.get_value("Company", doc.company, "default_currency")
+
+	return {
+		"item_name": item.get("item_name") or item.get("item_description") or "School Fees",
+		"quantity": item.get("quantity") or 1,
+		"unit_price": item.get("unit_price") or 0,
+		"total_amount": item.get("total_amount") or 0,
+		"tax_type_code": item.get("item_tax_type_code") or "D",
+		"currency": currency,
+		"formatted_unit_price": fmt_money(item.get("unit_price") or 0, currency=currency),
+		"formatted_total_amount": fmt_money(item.get("total_amount") or 0, currency=currency),
+	}
+
+
+def _normalize_header_digitax_details(doc):
+	if not getattr(doc, "custom_sale_id", None) and not getattr(doc, "custom_offline_url", None):
+		return None
+
+	return {
+		"source": "header",
+		"trader_invoice_number": getattr(doc, "custom_trader_invoice_number", None) or _get_trader_invoice_base(doc),
+		"sale_id": getattr(doc, "custom_sale_id", None) or "",
+		"offline_url": getattr(doc, "custom_offline_url", None) or "",
+		"etims_url": getattr(doc, "custom_etims_url", None) or "",
+		"serial_number": getattr(doc, "custom_serial_number", None) or "",
+		"invoice_number": getattr(doc, "custom_invoice_number", None) or "",
+		"status": getattr(doc, "custom_digitax_status", None) or "",
+		"date": getattr(doc, "custom_date", None) or "",
+		"time": getattr(doc, "custom_time", None) or "",
+		"receipt_type_code": getattr(doc, "custom_receipt_type_code", None) or "",
+	}
+
+
+def _normalize_amendment_digitax_details(row):
+	if row.get("status") != "Sent":
+		return None
+
+	sale_id = row.get("digitax_sale_id") or ""
+	offline_url = row.get("offline_url") or ""
+	if not sale_id and not offline_url:
+		return None
+
+	return {
+		"source": "amendment",
+		"trader_invoice_number": row.get("trader_invoice_number") or "",
+		"sale_id": sale_id,
+		"offline_url": offline_url,
+		"etims_url": row.get("etims_url") or "",
+		"serial_number": row.get("serial_number") or "",
+		"invoice_number": row.get("invoice_number") or "",
+		"status": row.get("digitax_status") or row.get("status") or "",
+		"date": row.get("digitax_date") or "",
+		"time": row.get("digitax_time") or "",
+		"receipt_type_code": row.get("receipt_type_code") or "",
+		"amendment_type": row.get("amendment_type") or "",
+	}
+
+
+def get_active_digitax_details(doc):
+	"""Resolve the latest completed Digitax sale for printing."""
+	header_details = _normalize_header_digitax_details(doc)
+	if header_details and header_details.get("offline_url"):
+		return header_details
+
+	latest_row = None
+	for row in reversed(doc.get("custom_digitax_amendments") or []):
+		if row.amendment_type not in ("Original Sale", "Virtual Sale"):
+			continue
+
+		normalized = _normalize_amendment_digitax_details(row.as_dict())
+		if normalized:
+			latest_row = normalized
+			break
+
+	return latest_row or header_details
+
+
+def _get_company_logo_url(company_name):
+	logo = frappe.db.get_value("Company", company_name, "company_logo")
+	if not logo:
+		return DEFAULT_LOGO_URL
+
+	if logo.startswith(("http://", "https://")):
+		return logo
+
+	return get_url(logo)
+
+
+def _get_company_details(company_name):
+	company = frappe.get_cached_doc("Company", company_name)
+	address = ""
+
+	if company.get("company_address"):
+		address = frappe.db.get_value("Address", company.company_address, "display") or ""
+
+	if not address:
+		address = frappe.db.get_value(
+			"Dynamic Link",
+			{"link_doctype": "Company", "link_name": company_name, "parenttype": "Address"},
+			"parent",
+		)
+		if address:
+			address = frappe.db.get_value("Address", address, "display") or ""
+
+	return {
+		"name": company.company_name or company_name,
+		"address": address,
+		"phone": company.phone_no or "",
+		"email": company.email or "",
+		"tax_id": company.tax_id or "",
+		"logo_url": _get_company_logo_url(company_name),
+	}
+
+
+def get_digitax_print_context(doc):
+	"""Build the print context used by the Digitax Tax Invoice print format."""
+	if isinstance(doc, str):
+		doc = frappe.get_doc("Sales Invoice", doc)
+	digitax_settings = frappe.get_single("Digitax Settings")
+	digitax_details = get_active_digitax_details(doc)
+	customer_pin = resolve_digitax_customer_pin(doc)
+	item = get_digitax_print_item(doc, digitax_settings)
+	tax_rows = get_digitax_tax_breakdown(item.get("tax_type_code"), item.get("total_amount"))
+	tax_rows = [row for row in tax_rows if row.get("taxable_amount") or row.get("tax_amount")]
+	currency = item.get("currency") or doc.currency
+
+	document_title = "Credit Note" if doc.is_return else "Sale Invoice"
+	status_text = (digitax_details or {}).get("status") or ""
+	if status_text:
+		status_text = status_text.upper()
+
+	scu_invoice_no = ""
+	if digitax_details:
+		serial_number = digitax_details.get("serial_number") or ""
+		invoice_number = digitax_details.get("invoice_number") or ""
+		if serial_number and invoice_number:
+			scu_invoice_no = f"{serial_number}/{invoice_number}"
+		else:
+			scu_invoice_no = invoice_number or serial_number
+
+	return {
+		"is_available": bool(digitax_details and digitax_details.get("offline_url")),
+		"document_title": document_title,
+		"status_text": status_text,
+		"digitax": digitax_details or {},
+		"company": _get_company_details(doc.company),
+		"customer": {
+			"name": doc.customer_name or doc.customer or "",
+			"pin": customer_pin.get("pin") or "",
+			"pin_source": customer_pin.get("source") or "",
+		},
+		"item": item,
+		"tax_rows": tax_rows,
+		"currency": currency,
+		"formatted_grand_total": fmt_money(item.get("total_amount") or 0, currency=currency),
+		"scu_invoice_no": scu_invoice_no,
+		"invoice_name": doc.name,
+		"posting_date": doc.posting_date,
+	}

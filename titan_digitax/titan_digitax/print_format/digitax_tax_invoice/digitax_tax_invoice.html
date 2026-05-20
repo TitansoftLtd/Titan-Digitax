@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Digitax Tax Invoice</title>
+</head>
+<body>
+{% set ctx = get_digitax_print_context(doc) %}
+
+<div class="digitax-receipt">
+  <div class="receipt-header">
+    <h3 class="school-name">{{ ctx.company.name }}</h3>
+  </div>
+
+  {% if not ctx.is_available %}
+  <div class="notice-box">
+    <p>This invoice has not been sent to Digitax or has no active sale available to print.</p>
+  </div>
+  {% else %}
+
+  <div class="receipt-content">
+    <div class="receipt-info">
+      <div class="doc-banner">
+        <div class="doc-type">{{ ctx.document_title }}</div>
+      </div>
+
+      <div class="info-row"><span class="receipt-label">Invoice:</span><span class="receipt-value">{{ ctx.digitax.trader_invoice_number }}</span></div>
+      {% if ctx.digitax.serial_number %}
+      <div class="info-row"><span class="receipt-label">Serial Number:</span><span class="receipt-value">{{ ctx.digitax.serial_number }}</span></div>
+      {% endif %}
+      {% if ctx.digitax.date or ctx.digitax.time %}
+      <div class="info-row"><span class="receipt-label">Date / Time:</span><span class="receipt-value">{{ ctx.digitax.date }}{% if ctx.digitax.time %} - {{ ctx.digitax.time }}{% endif %}</span></div>
+      {% endif %}
+      <div class="info-row"><span class="receipt-label">ERP Invoice:</span><span class="receipt-value">{{ ctx.invoice_name }}</span></div>
+      <div class="info-row"><span class="receipt-label">Posting Date:</span><span class="receipt-value">{{ ctx.posting_date }}</span></div>
+    </div>
+
+    <div class="right-section">
+      <div class="school-logo">
+        <img src="{{ ctx.company.logo_url }}" alt="Company Logo" />
+      </div>
+      <div class="signature-box"></div>
+    </div>
+  </div>
+
+  <div class="section-block">
+    <div class="section-title">Organization Details</div>
+    <div class="info-row"><span class="receipt-label">Name:</span><span class="receipt-value">{{ ctx.company.name }}</span></div>
+    {% if ctx.company.address %}
+    <div class="info-row"><span class="receipt-label">Address:</span><span class="receipt-value">{{ ctx.company.address }}</span></div>
+    {% endif %}
+    {% if ctx.company.phone %}
+    <div class="info-row"><span class="receipt-label">Tel:</span><span class="receipt-value">{{ ctx.company.phone }}</span></div>
+    {% endif %}
+    {% if ctx.company.email %}
+    <div class="info-row"><span class="receipt-label">Email:</span><span class="receipt-value">{{ ctx.company.email }}</span></div>
+    {% endif %}
+    {% if ctx.company.tax_id %}
+    <div class="info-row"><span class="receipt-label">PIN:</span><span class="receipt-value">{{ ctx.company.tax_id }}</span></div>
+    {% endif %}
+  </div>
+
+  <div class="section-block">
+    <div class="section-title">Customer Details</div>
+    <div class="info-row"><span class="receipt-label">Name:</span><span class="receipt-value">{{ ctx.customer.name }}</span></div>
+    <div class="info-row"><span class="receipt-label">PIN:</span><span class="receipt-value">{{ ctx.customer.pin or "" }}</span></div>
+  </div>
+
+  <div class="section-block">
+    <div class="section-title">Items</div>
+    <table class="items-table">
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th class="text-right">Unit Price</th>
+          <th class="text-right">Qty</th>
+          <th class="text-right">Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>{{ ctx.item.item_name }}</td>
+          <td class="text-right">{{ ctx.item.formatted_unit_price }}</td>
+          <td class="text-right">x{{ ctx.item.quantity | int }}</td>
+          <td class="text-right">{{ ctx.item.formatted_total_amount }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="total-row">
+      <span>Total:</span>
+      <span>{{ ctx.formatted_grand_total }}</span>
+    </div>
+  </div>
+
+  {% if ctx.tax_rows %}
+  <div class="section-block">
+    <div class="section-title">Tax Summary</div>
+    <table class="tax-table">
+      <thead>
+        <tr>
+          <th>Tax Class</th>
+          <th class="text-right">Taxable Amount</th>
+          <th class="text-right">Tax Rate (%)</th>
+          <th class="text-right">Tax Amount ({{ ctx.currency }})</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in ctx.tax_rows %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td class="text-right">{{ row.taxable_amount }}</td>
+          <td class="text-right">{{ row.tax_rate }}</td>
+          <td class="text-right">{{ row.tax_amount }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="footer-block">
+    <div class="footer-content">
+      <div class="footer-info">
+        {% if ctx.digitax.date %}
+        <div class="info-row"><span class="receipt-label">Date:</span><span class="receipt-value">{{ ctx.digitax.date }}</span></div>
+        {% endif %}
+        {% if ctx.digitax.time %}
+        <div class="info-row"><span class="receipt-label">Time:</span><span class="receipt-value">{{ ctx.digitax.time }}</span></div>
+        {% endif %}
+        {% if ctx.digitax.serial_number %}
+        <div class="info-row"><span class="receipt-label">SCU ID:</span><span class="receipt-value">{{ ctx.digitax.serial_number }}</span></div>
+        {% endif %}
+        {% if ctx.scu_invoice_no %}
+        <div class="info-row"><span class="receipt-label">SCU invoice no:</span><span class="receipt-value">{{ ctx.scu_invoice_no }}</span></div>
+        {% endif %}
+        {% if ctx.digitax.sale_id %}
+        <div class="info-row"><span class="receipt-label">Sale ID:</span><span class="receipt-value">{{ ctx.digitax.sale_id }}</span></div>
+        {% endif %}
+      </div>
+
+      {% if ctx.digitax.offline_url %}
+      <div class="footer-qr">
+        <div class="qr-label">View eTIMS verification qr code</div>
+        <img class="qr-image" src="{{ get_qr_code_data_uri(ctx.digitax.offline_url) }}" alt="Digitax verification QR code" />
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% endif %}
+</div>
+</body>
+</html>
