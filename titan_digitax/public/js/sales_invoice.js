@@ -3,6 +3,7 @@ frappe.ui.form.on("Sales Invoice", {
 		// Show button for all submitted invoices (duplicate handling is done on backend)
 		if (frm.doc.docstatus === 1) {
 			add_send_to_digitax_button(frm);
+			add_print_digitax_button(frm);
 			add_virtual_amendment_buttons(frm);
 		}
 	},
@@ -130,6 +131,16 @@ const add_send_to_digitax_button = (frm) => {
 				frm.reload_doc();
 			},
 		});
+	}, __("Digitax Actions"));
+};
+
+const add_print_digitax_button = (frm) => {
+	if (!frm.doc.custom_sent_to_digitax && !frm.doc.custom_sale_id) {
+		return;
+	}
+
+	frm.add_custom_button(__("Print Digitax Invoice"), function () {
+		frappe.utils.print(frm.doctype, frm.doc.name, "Digitax Tax Invoice");
 	}, __("Digitax Actions"));
 };
 
