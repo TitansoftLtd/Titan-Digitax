@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from frappe import _
 from frappe.utils import now_datetime
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
+from .company_config import is_digitax_enabled_for_company, get_enabled_digitax_companies
 
 
 @frappe.whitelist()
@@ -51,12 +52,17 @@ def send_sales_invoice_to_digitax(docname):
         logger.info(f"Skipping: Company not in {target_country} (Country: {company_country})")
         return {"skipped": True, "reason": f"Company not in {target_country}"}
     
-    # Check if company is enabled
-    company_enabled = frappe.db.get_value("Company", doc.company, "custom_enable_company")
-    logger.info(f"Company Enabled Check: {company_enabled}")
-    if not company_enabled:
-        logger.info(f"Skipping: Company Digitax integration not enabled")
-        return {"skipped": True, "reason": "Company Digitax integration disabled"}
+    # Check if this company has an enabled row in Digitax Settings.
+    # Credit notes (is_return=1) and invoices that already have a custom_sale_id are allowed
+    # through regardless so that reversals and amendments never get blocked even when a company
+    # is later disabled (send-block, amend-allow policy).
+    is_amendment_or_return = bool(doc.is_return or doc.get("custom_sale_id"))
+    if not is_amendment_or_return:
+        if not is_digitax_enabled_for_company(doc.company, digitax_settings):
+            logger.info(f"Skipping: Company {doc.company} has no enabled row in Digitax Settings")
+            return {"skipped": True, "reason": "Company not enabled in Digitax Settings"}
+    else:
+        logger.info(f"Company eligibility check bypassed for credit note / amendment (is_return={doc.is_return}, custom_sale_id={doc.get('custom_sale_id')})")
 
     # Increment retry count if this is a retry (error message exists)
     if doc.custom_error_message:
@@ -219,7 +225,15 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
         except (ValueError, TypeError):
             retry_count = 5  # Fallback if conversion fails
     
-    valid_companies = frappe.get_all("Company", filters={ "country": target_country, "custom_enable_company": 1 }, pluck="name")
+    # Use the Digitax-owned enablement table rather than Company.custom_enable_company,
+    # intersected with target_country as a defensive backstop.
+    target_country_companies = set(frappe.get_all(
+        "Company", filters={"country": target_country, "is_group": 0}, pluck="name"
+    ))
+    valid_companies = [
+        c for c in get_enabled_digitax_companies(digitax_settings)
+        if c in target_country_companies
+    ]
     filters = {
         "docstatus": 1,
         "custom_sent_to_digitax": 0,
