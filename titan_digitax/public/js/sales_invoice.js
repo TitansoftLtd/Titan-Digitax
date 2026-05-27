@@ -1,11 +1,21 @@
 frappe.ui.form.on("Sales Invoice", {
 	refresh: function (frm) {
-		// Show button for all submitted invoices (duplicate handling is done on backend)
-		if (frm.doc.docstatus === 1) {
-			add_send_to_digitax_button(frm);
-			add_print_digitax_button(frm);
-			add_virtual_amendment_buttons(frm);
+		if (frm.doc.docstatus !== 1 || !frm.doc.company) {
+			return;
 		}
+
+		frappe.call({
+			method: "titan_digitax.titan_digitax.utils.company_config.get_company_digitax_status",
+			args: { company: frm.doc.company },
+			callback: function (r) {
+				if (!r.message || !r.message.eligible) {
+					return;
+				}
+				add_send_to_digitax_button(frm);
+				add_print_digitax_button(frm);
+				add_virtual_amendment_buttons(frm);
+			},
+		});
 	},
 });
 
