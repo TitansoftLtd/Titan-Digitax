@@ -14,6 +14,8 @@
   "api_request_timeout",
   "max_retry_attempts",
   "background_job_timeout",
+  "eligible_companies_section",
+  "company_configurations",
   "virtual_amendments_section",
   "virtual_amendment_role",
   "default_item_settings_section",
@@ -92,6 +94,18 @@
    "fieldname": "background_job_timeout",
    "fieldtype": "Int",
    "label": "Background Job Timeout (seconds)"
+  },
+  {
+   "fieldname": "eligible_companies_section",
+   "fieldtype": "Section Break",
+   "label": "Eligible Companies",
+   "description": "Only companies listed here with Enabled checked will have their invoices sent to Digitax."
+  },
+  {
+   "fieldname": "company_configurations",
+   "fieldtype": "Table",
+   "label": "Company Configurations",
+   "options": "Digitax Company Configuration"
   },
   {
    "fieldname": "virtual_amendments_section",
@@ -208,7 +222,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-01-25 16:59:53.529077",
+ "modified": "2026-05-27 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Settings",
