@@ -150,7 +150,17 @@ const add_print_digitax_button = (frm) => {
 	}
 
 	frm.add_custom_button(__("Print Digitax Invoice"), function () {
-		frappe.utils.print(frm.doctype, frm.doc.name, "Digitax Tax Invoice");
+		// Official Digitax receipt page (receipt.dg.tax) rendered to PDF on the server.
+		const download_url =
+			frappe.urllib.get_full_url(
+				"/api/method/titan_digitax.titan_digitax.utils.print_format.download_digitax_receipt_pdf"
+			) +
+			"?invoice_name=" +
+			encodeURIComponent(frm.doc.name);
+		window.open(download_url);
+
+		// Legacy local print format — uncomment to revert if client prefers the in-app layout:
+		// frappe.utils.print(frm.doctype, frm.doc.name, "Digitax Tax Invoice");
 	}, __("Digitax Actions"));
 };
 

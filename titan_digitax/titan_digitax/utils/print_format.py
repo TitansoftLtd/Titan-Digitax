@@ -1,5 +1,9 @@
 import frappe
+from urllib.parse import urlparse
+
+from frappe import _
 from frappe.utils import fmt_money, get_url
+from frappe.www.printview import validate_print_permission
 
 from titan_digitax.titan_digitax.utils.sales import (
 	_get_default_digitax_item,
@@ -24,6 +28,139 @@ TAX_CLASS_RATES = {
 }
 
 DEFAULT_LOGO_URL = "http://mamba.braeburn.com/files/Braeburn%20Logo.svg"
+ALLOWED_DIGITAX_RECEIPT_HOSTS = frozenset({"receipt.dg.tax"})
+DIGITAX_RECEIPT_VIEWPORT = {"width": 1280, "height": 900}
+DIGITAX_RECEIPT_LOAD_TIMEOUT_MS = 60000
+DIGITAX_RECEIPT_RENDER_WAIT_MS = 2000
+
+# Digitax receipt pages trap content in h-screen / overflow:auto containers.
+# Expand them before PDF capture so the full receipt is included.
+EXPAND_SCROLL_CONTAINERS_JS = """() => {
+	[...document.querySelectorAll("*")]
+		.filter((el) => el.scrollHeight > el.clientHeight + 20)
+		.forEach((el) => {
+			el.style.height = `${el.scrollHeight}px`;
+			el.style.maxHeight = "none";
+			el.style.overflow = "visible";
+			el.style.overflowY = "visible";
+		});
+
+	document.querySelectorAll(".h-screen, .h-full").forEach((el) => {
+		el.style.height = "auto";
+	});
+
+	return Math.ceil(
+		Math.max(
+			...[...document.querySelectorAll("*")].map((el) => el.getBoundingClientRect().bottom),
+			document.documentElement.scrollHeight,
+		)
+	);
+}"""
+
+
+def _validate_digitax_receipt_url(url):
+	parsed = urlparse(url or "")
+	if parsed.scheme not in ("http", "https") or parsed.netloc not in ALLOWED_DIGITAX_RECEIPT_HOSTS:
+		frappe.throw(_("Invalid Digitax receipt URL."))
+
+
+def _launch_playwright_browser(playwright):
+	"""Launch headless Chromium, preferring the system Chrome install when available."""
+	launch_attempts = []
+
+	chrome_path = frappe.conf.get("chrome_path")
+	if chrome_path:
+		launch_attempts.append(
+			lambda: playwright.chromium.launch(headless=True, executable_path=chrome_path)
+		)
+
+	launch_attempts.extend(
+		[
+			lambda: playwright.chromium.launch(channel="chrome", headless=True),
+			lambda: playwright.chromium.launch(channel="chromium", headless=True),
+			lambda: playwright.chromium.launch(headless=True),
+		]
+	)
+
+	last_error = None
+	for launch in launch_attempts:
+		try:
+			return launch()
+		except Exception as exc:
+			last_error = exc
+
+	frappe.log_error(
+		message=f"Could not launch headless browser for Digitax receipt PDF: {last_error}",
+		title="Digitax Receipt PDF Error",
+	)
+	frappe.throw(
+		_(
+			"Could not generate a styled Digitax receipt PDF because headless Chrome/Chromium "
+			"is not available. Install Google Chrome or Chromium, run "
+			"'playwright install chromium', or set 'chrome_path' in site config."
+		)
+	)
+
+
+def _get_pdf_from_receipt_url(url):
+	"""Render the official Digitax receipt page as PDF via headless browser."""
+	_validate_digitax_receipt_url(url)
+
+	try:
+		from playwright.sync_api import sync_playwright
+	except ImportError:
+		frappe.throw(
+			_(
+				"Playwright is required to generate Digitax receipt PDFs. "
+				"Install it with: bench pip install playwright"
+			)
+		)
+
+	with sync_playwright() as playwright:
+		browser = _launch_playwright_browser(playwright)
+		try:
+			page = browser.new_page(viewport=DIGITAX_RECEIPT_VIEWPORT)
+			page.goto(url, wait_until="networkidle", timeout=DIGITAX_RECEIPT_LOAD_TIMEOUT_MS)
+			page.wait_for_timeout(DIGITAX_RECEIPT_RENDER_WAIT_MS)
+
+			content_height_px = page.evaluate(EXPAND_SCROLL_CONTAINERS_JS)
+			page.set_viewport_size(
+				{
+					"width": DIGITAX_RECEIPT_VIEWPORT["width"],
+					"height": max(content_height_px + 50, DIGITAX_RECEIPT_VIEWPORT["height"]),
+				}
+			)
+			page.wait_for_timeout(300)
+
+			paper_height_in = (content_height_px / 96) + 0.5
+			return page.pdf(
+				width="8.27in",
+				height=f"{paper_height_in:.2f}in",
+				print_background=True,
+				margin={"top": "0", "bottom": "0", "left": "0", "right": "0"},
+			)
+		finally:
+			browser.close()
+
+
+@frappe.whitelist()
+def download_digitax_receipt_pdf(invoice_name):
+	"""Download the official Digitax receipt page (offline URL) as PDF."""
+	doc = frappe.get_doc("Sales Invoice", invoice_name)
+	validate_print_permission(doc)
+
+	digitax_details = get_active_digitax_details(doc)
+	offline_url = (digitax_details or {}).get("offline_url")
+	if not offline_url:
+		frappe.throw(_("This invoice has no Digitax receipt URL available to download."))
+
+	pdf_file = _get_pdf_from_receipt_url(offline_url)
+	trader_invoice_number = (digitax_details or {}).get("trader_invoice_number") or doc.name
+	filename = trader_invoice_number.replace(" ", "-").replace("/", "-")
+
+	frappe.local.response.filename = f"{filename}.pdf"
+	frappe.local.response.filecontent = pdf_file
+	frappe.local.response.type = "pdf"
 
 
 def get_qr_code_data_uri(text):
