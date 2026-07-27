@@ -30,7 +30,7 @@ const add_send_to_digitax_button = (frm) => {
 			freeze_message: __("Sending Sales Invoice to Digitax..."),
 			callback: function (r) {
 				console.log("=== DIGITAX: Response received:", r);
-				
+
 				// Python exception occurred
 				if (r.exc) {
 					console.error("=== DIGITAX: Python exception occurred:", r.exc);
@@ -46,7 +46,7 @@ const add_send_to_digitax_button = (frm) => {
 				// Check if message exists and has the expected structure
 				if (r.message) {
 					console.log("=== DIGITAX: Message object:", r.message);
-					
+
 					// Check if request was skipped
 					if (r.message.skipped) {
 						frappe.msgprint({
@@ -58,7 +58,7 @@ const add_send_to_digitax_button = (frm) => {
 						});
 						return;
 					}
-					
+
 					// Check for general error
 					if (r.message.error) {
 						frappe.msgprint({
@@ -71,7 +71,7 @@ const add_send_to_digitax_button = (frm) => {
 						frm.reload_doc();
 						return;
 					}
-					
+
 					// Check for API error response (has 'code' property indicating error)
 					// But skip 409 as it means invoice already exists (handled as success)
 					if (r.message.code && r.message.code !== '409') {
@@ -99,19 +99,19 @@ const add_send_to_digitax_button = (frm) => {
 								indicator: "green",
 							});
 						} else {
-						frappe.msgprint({
-							title: __("Success"),
+							frappe.msgprint({
+								title: __("Success"),
 								message: __("Sales Invoice sent to Digitax successfully!<br><br>Sale ID: {0}<br>Status: {1}", [
 									r.message.id,
 									r.message.status,
 								]),
-							indicator: "green",
-						});
-					}
+								indicator: "green",
+							});
+						}
 						frm.reload_doc();
 						return;
 					}
-					
+
 					// Unknown response format
 					console.warn("=== DIGITAX: Unknown response format:", r.message);
 					frappe.msgprint({
@@ -127,7 +127,7 @@ const add_send_to_digitax_button = (frm) => {
 						indicator: "orange",
 					});
 				}
-				
+
 				frm.reload_doc();
 			},
 			error: function (r) {
@@ -151,16 +151,16 @@ const add_print_digitax_button = (frm) => {
 
 	frm.add_custom_button(__("Print Digitax Invoice"), function () {
 		// Official Digitax receipt page (receipt.dg.tax) rendered to PDF on the server.
-		const download_url =
-			frappe.urllib.get_full_url(
-				"/api/method/titan_digitax.titan_digitax.utils.print_format.download_digitax_receipt_pdf"
-			) +
-			"?invoice_name=" +
-			encodeURIComponent(frm.doc.name);
-		window.open(download_url);
+		// const download_url =
+		// 	frappe.urllib.get_full_url(
+		// 		"/api/method/titan_digitax.titan_digitax.utils.print_format.download_digitax_receipt_pdf"
+		// 	) +
+		// 	"?invoice_name=" +
+		// 	encodeURIComponent(frm.doc.name);
+		// window.open(download_url);
 
 		// Legacy local print format — uncomment to revert if client prefers the in-app layout:
-		// frappe.utils.print(frm.doctype, frm.doc.name, "Digitax Tax Invoice");
+		frappe.utils.print(frm.doctype, frm.doc.name, "Fee Note PF");
 	}, __("Digitax Actions"));
 };
 
