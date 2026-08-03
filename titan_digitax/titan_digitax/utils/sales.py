@@ -6,6 +6,7 @@ from frappe import _
 from frappe.utils import now_datetime
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
 from .company_config import is_digitax_enabled_for_company, get_enabled_digitax_companies
+from .sales_items import build_digitax_items_payload
 
 
 @frappe.whitelist()
@@ -111,35 +112,17 @@ def send_sales_invoice_to_digitax(docname):
             frappe.msgprint(f"Original sale not found in Digitax. Cannot process credit note for {doc.name}.")
             return
 
-    # For credit notes, grand_total is negative, so we use abs() to get positive value
-    amount = abs(doc.grand_total)
-    logger.info(f"Calculated amount: {amount} (Original grand_total: {doc.grand_total})")
-    
-    # Get item details from settings
-    item_bar_code = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
-    item_name = digitax_settings.get("default_item_name") or "School Fees"
-    item_description = digitax_settings.get("default_item_description") or "School Fees"
-    
-    new_item = {
-        "item_bar_code": item_bar_code,
-        "quantity": 1,
-        "unit_price": amount,
-        "total_amount": amount,
-        "package_unit_quantity": amount,
-        "discount_rate": 0,
-        "discount_amount": 0,
-        "item_description": item_description,
-    }
+    # D9/D14: aggregate SI lines by DigiTax display name (Digitax Item Name when required)
+    built = build_digitax_items_payload(doc, digitax_settings, logger)
+    if not built.get("ok"):
+        return {
+            "skipped": True,
+            "reason": built.get("reason"),
+            "message": built.get("message"),
+        }
 
-    if not doc.is_return:
-        new_item["item_name"] = item_name
-        # Use default values from Digitax Settings
-        new_item["item_class_code"] = digitax_settings.get("default_item_class_code") or "99020000"
-        new_item["item_tax_type_code"] = digitax_settings.get("default_item_tax_type_code") or "D"
-        new_item["is_stockable"] = bool(digitax_settings.get("default_is_stockable"))
-
-    payload["items"].append(new_item)
-    logger.info(f"Item added to payload: {new_item}")
+    payload["items"] = built["items"]
+    logger.info(f"Items added to payload ({len(payload['items'])} line(s)): {payload['items']}")
 
     response_data, status_code = _post_to_digitax(endpoint, payload, digitax_settings, logger)
 

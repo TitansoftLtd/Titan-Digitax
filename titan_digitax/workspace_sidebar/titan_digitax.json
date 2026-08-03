@@ -1,0 +1,88 @@
+{
+ "app": "titan_digitax",
+ "creation": "2026-07-30 11:00:00",
+ "docstatus": 0,
+ "doctype": "Workspace Sidebar",
+ "header_icon": "receipt",
+ "idx": 0,
+ "items": [
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "settings",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Digitax Settings",
+   "link_to": "Digitax Settings",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "refresh-cw",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Digitax Sync Job",
+   "link_to": "Digitax Sync Job",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "circle-alert",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Failed Digitax Invoices",
+   "link_to": "Failed Digitax Invoices",
+   "link_type": "Report",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "file-text",
+   "indent": 1,
+   "keep_closed": 0,
+   "label": "Invoicing",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Section Break"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "icon": "",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Sales Invoice",
+   "link_to": "Sales Invoice",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 1,
+   "collapsible": 1,
+   "icon": "",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Item",
+   "link_to": "Item",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  }
+ ],
+ "modified": "2026-08-03 19:51:50.730118",
+ "modified_by": "Administrator",
+ "module": "Titan Digitax",
+ "name": "Titan Digitax",
+ "owner": "Administrator",
+ "standard": 1,
+ "title": "Titan Digitax"
+}

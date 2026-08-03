@@ -14,14 +14,23 @@
   "api_request_timeout",
   "max_retry_attempts",
   "background_job_timeout",
+  "item_sync_overrides_section",
+  "require_digitax_item_name",
+  "require_manual_item_sync",
+  "column_break_d14",
+  "auto_sync_items_to_digitax",
   "eligible_companies_section",
   "company_configurations",
   "virtual_amendments_section",
   "virtual_amendment_role",
   "default_item_settings_section",
   "default_item_class_code",
-  "column_break_items",
+  "default_item_type_code",
   "default_item_tax_type_code",
+  "column_break_items",
+  "default_origin_nation_code",
+  "default_package_unit_code",
+  "default_quantity_unit_code",
   "school_fees_item_section",
   "default_item_bar_code",
   "default_item_name",
@@ -94,6 +103,37 @@
    "fieldname": "background_job_timeout",
    "fieldtype": "Int",
    "label": "Background Job Timeout (seconds)"
+  },
+  {
+   "fieldname": "item_sync_overrides_section",
+   "fieldtype": "Section Break",
+   "label": "Item Sync Overrides",
+   "description": "D14 gates for DigiTax send. St. Austin defaults: require Digitax Item Name ON, require manual sync ON, auto-sync OFF."
+  },
+  {
+   "default": "1",
+   "description": "When ON, every SI line Item must have Digitax Item Name; DigiTax receives that name only (never ERP item name).",
+   "fieldname": "require_digitax_item_name",
+   "fieldtype": "Check",
+   "label": "Require Digitax Item Name"
+  },
+  {
+   "default": "1",
+   "description": "When ON, DigiTax send blocks unless Item already has custom_digitax_id (manual Sync to Digitax).",
+   "fieldname": "require_manual_item_sync",
+   "fieldtype": "Check",
+   "label": "Require Manual Item Sync"
+  },
+  {
+   "fieldname": "column_break_d14",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "When ON, missing DigiTax IDs may be auto-created/reused by display name during send. Not for St. Austin default.",
+   "fieldname": "auto_sync_items_to_digitax",
+   "fieldtype": "Check",
+   "label": "Auto Sync Items to Digitax"
   },
   {
    "fieldname": "eligible_companies_section",
@@ -169,8 +209,11 @@
    "label": "Default Item Class Code"
   },
   {
-   "fieldname": "column_break_items",
-   "fieldtype": "Column Break"
+   "default": "3",
+   "description": "Fallback item type code for DigiTax item create (default: 3)",
+   "fieldname": "default_item_type_code",
+   "fieldtype": "Data",
+   "label": "Default Item Type Code"
   },
   {
    "default": "D",
@@ -179,6 +222,31 @@
    "fieldtype": "Select",
    "label": "Default Item Tax Type Code",
    "options": "\nA\nB\nC\nD\nE"
+  },
+  {
+   "fieldname": "column_break_items",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "KE",
+   "description": "Fallback origin nation code for DigiTax item create (default: KE)",
+   "fieldname": "default_origin_nation_code",
+   "fieldtype": "Data",
+   "label": "Default Origin Nation Code"
+  },
+  {
+   "default": "NT",
+   "description": "Fallback package unit code for DigiTax item create (default: NT)",
+   "fieldname": "default_package_unit_code",
+   "fieldtype": "Data",
+   "label": "Default Package Unit Code"
+  },
+  {
+   "default": "U",
+   "description": "Fallback quantity unit code for DigiTax item create (default: U)",
+   "fieldname": "default_quantity_unit_code",
+   "fieldtype": "Data",
+   "label": "Default Quantity Unit Code"
   },
   {
    "fieldname": "school_fees_item_section",
@@ -222,7 +290,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-05-27 00:00:00.000000",
+ "modified": "2026-07-30 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Settings",
