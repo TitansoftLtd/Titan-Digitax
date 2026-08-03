@@ -1,6 +1,6 @@
 {
  "app": "titan_digitax",
- "creation": "2026-07-30 11:00:00.000000",
+ "creation": "2026-07-30 11:00:00",
  "docstatus": 0,
  "doctype": "Workspace Sidebar",
  "header_icon": "receipt",
@@ -78,11 +78,11 @@
    "type": "Link"
   }
  ],
- "modified": "2026-07-30 11:00:00.000000",
+ "modified": "2026-08-03 19:51:50.730118",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
- "name": "Digitax",
+ "name": "Titan Digitax",
  "owner": "Administrator",
  "standard": 1,
- "title": "Digitax"
+ "title": "Titan Digitax"
 }
