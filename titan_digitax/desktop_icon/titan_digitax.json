@@ -1,23 +1,27 @@
 {
  "app": "titan_digitax",
  "bg_color": "",
- "creation": "2026-07-30 11:00:00.000000",
+ "creation": "2026-07-30 11:00:00",
  "docstatus": 0,
  "doctype": "Desktop Icon",
  "hidden": 0,
  "icon": "",
  "icon_type": "Link",
  "idx": 0,
- "label": "Digitax",
+ "label": "Titan Digitax",
  "link_to": "Titan Digitax",
  "link_type": "Workspace Sidebar",
- "logo_url": "/assets/titan_digitax/icons/desktop_icons/subtle/digitax.svg",
- "modified": "2026-07-30 11:12:00.000000",
+ "logo_url": "/assets/titan_digitax/icons/desktop_icons/subtle/titan_digitax.svg",
+ "modified": "2026-08-03 20:07:51.380571",
  "modified_by": "Administrator",
- "name": "Digitax",
+ "name": "Titan Digitax",
  "owner": "Administrator",
  "parent_icon": "",
  "restrict_removal": 0,
- "roles": [],
+ "roles": [
+  {
+   "role": "Accounts Manager"
+  }
+ ],
  "standard": 1
 }
