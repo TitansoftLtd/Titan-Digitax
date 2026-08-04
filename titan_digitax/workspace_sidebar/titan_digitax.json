@@ -21,6 +21,18 @@
   {
    "child": 0,
    "collapsible": 1,
+   "icon": "building",
+   "indent": 0,
+   "keep_closed": 0,
+   "label": "Digitax Company Settings",
+   "link_to": "Digitax Company Settings",
+   "link_type": "DocType",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
    "icon": "refresh-cw",
    "indent": 0,
    "keep_closed": 0,
@@ -78,7 +90,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-08-03 19:51:50.730118",
+ "modified": "2026-08-04 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Titan Digitax",
