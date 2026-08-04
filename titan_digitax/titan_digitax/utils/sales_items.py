@@ -12,7 +12,7 @@ from titan_digitax.titan_digitax.utils import item_registry
 from titan_digitax.titan_digitax.utils.actionable import create_actionable_item
 
 
-def get_digitax_display_name(item_code, digitax_settings=None):
+def get_digitax_display_name(item_code, company, digitax_settings=None):
 	"""
 	Resolve DigiTax display name for an ERP Item (plan §2.1).
 
@@ -22,8 +22,11 @@ def get_digitax_display_name(item_code, digitax_settings=None):
 	if not item_code:
 		return None
 
-	settings = digitax_settings or frappe.get_single("Digitax Settings")
-	require_name = bool(settings.get("require_digitax_item_name", 1))
+	if digitax_settings is None:
+		from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
+
+		digitax_settings = get_digitax_settings(company)
+	require_name = bool(digitax_settings.get("require_digitax_item_name", 1))
 
 	row = frappe.db.get_value(
 		"Item",
@@ -339,7 +342,7 @@ def _block_gate_failures(doc, gate_failures, require_name, require_sync, log):
 		)
 	error_msg = "; ".join(parts)
 	if require_name or require_sync:
-		error_msg += ". DigiTax send blocked by Digitax Settings gates."
+		error_msg += ". DigiTax send blocked by Digitax Company Settings gates."
 
 	create_actionable_item(
 		title=f"Digitax Item Gates Failed: {doc.name}",

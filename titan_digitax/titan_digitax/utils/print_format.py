@@ -213,7 +213,10 @@ def get_digitax_tax_breakdown(tax_type_code, amount):
 
 def get_digitax_print_item(doc, digitax_settings=None):
 	"""Return the consolidated Digitax item line for print display."""
-	digitax_settings = digitax_settings or frappe.get_single("Digitax Settings")
+	if digitax_settings is None:
+		from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
+
+		digitax_settings = get_digitax_settings(doc.company)
 	include_sale_fields = not doc.is_return
 	item = _get_default_digitax_item(doc, digitax_settings, include_sale_fields)
 	currency = doc.currency or frappe.db.get_value("Company", doc.company, "default_currency")
@@ -334,7 +337,9 @@ def get_digitax_print_context(doc):
 	"""Build the print context used by the Digitax Tax Invoice print format."""
 	if isinstance(doc, str):
 		doc = frappe.get_doc("Sales Invoice", doc)
-	digitax_settings = frappe.get_single("Digitax Settings")
+	from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
+
+	digitax_settings = get_digitax_settings(doc.company)
 	digitax_details = get_active_digitax_details(doc)
 	customer_pin = resolve_digitax_customer_pin(doc)
 	item = get_digitax_print_item(doc, digitax_settings)

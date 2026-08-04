@@ -12,22 +12,28 @@ from titan_digitax.titan_digitax.utils.digitax_client import DigitaxClient
 from titan_digitax.titan_digitax.utils.sales_items import get_digitax_display_name
 
 
-def create_and_sync_item_from_mis(item_name, price):
+def create_and_sync_item_from_mis(item_name, price, company):
 	"""
-	Create Item in ERPNext with defaults from Digitax Settings, then sync to Digitax.
+	Create Item in ERPNext with defaults from this company's Digitax Company Settings,
+	then sync to Digitax.
 
-	Used only when Digitax Settings auto_sync_items_to_digitax is enabled (D14).
-	Engage/school sync should not call this by default (D10).
+	Used only when a company's Digitax Company Settings has auto_sync_items_to_digitax
+	enabled (D14). Engage/school sync should not call this by default (D10).
 	"""
+	from titan_digitax.titan_digitax.utils.company_config import (
+		get_digitax_settings,
+		is_digitax_enabled_for_company,
+	)
+
 	try:
-		settings = frappe.get_single("Digitax Settings")
-
-		if not settings.enable:
+		if not is_digitax_enabled_for_company(company):
 			return {
 				"status": "failed",
 				"reason": "Digitax integration not enabled",
 				"item_name": None,
 			}
+
+		settings = get_digitax_settings(company)
 
 		if frappe.db.exists("Item", item_name):
 			frappe.logger().info(f"Item {item_name} already exists (created by concurrent process)")
@@ -80,7 +86,7 @@ def create_and_sync_item_from_mis(item_name, price):
 		frappe.db.commit()
 
 		try:
-			result = sync_item_to_digitax(item_name)
+			result = sync_item_to_digitax(item_name, company)
 			if result.get("status") == "success":
 				return {
 					"status": "success",
@@ -150,32 +156,32 @@ def _reuse_digitax_id_by_display_name(item, display_name, company):
 
 
 @frappe.whitelist()
-def sync_item_to_digitax(item_name, company=None):
+def sync_item_to_digitax(item_name, company):
 	"""
 	Sync a single Item to Digitax for one company.
 	Called from "Sync to Digitax" button on Item form.
 	"""
+	from titan_digitax.titan_digitax.utils.company_config import (
+		get_digitax_settings,
+		is_digitax_enabled_for_company,
+	)
+
 	try:
 		item = frappe.get_doc("Item", item_name)
 
 		# "Already synced" has to be judged per company: each company registers the
 		# item in its own catalogue and gets its own id back.
-		if company:
-			existing = item_registry.get_registration(item.name, company)
-			if existing and (existing.digitax_id or "").strip():
-				return {
-					"status": "error",
-					"message": f"This item is already synced to Digitax for {company}",
-				}
-		elif item.custom_digitax_id:
+		existing = item_registry.get_registration(item.name, company)
+		if existing and (existing.digitax_id or "").strip():
 			return {
 				"status": "error",
-				"message": "This item is already synced to Digitax",
+				"message": f"This item is already synced to Digitax for {company}",
 			}
 
-		settings = frappe.get_single("Digitax Settings")
-		if not settings.enable:
-			frappe.throw("Digitax integration is not enabled. Please enable it in Digitax Settings.")
+		if not is_digitax_enabled_for_company(company):
+			frappe.throw(f"Digitax integration is not enabled for {company}.")
+
+		settings = get_digitax_settings(company)
 
 		display_name = item_registry.get_display_name(item.name, company, settings)
 		require_name = bool(settings.get("require_digitax_item_name", 1))

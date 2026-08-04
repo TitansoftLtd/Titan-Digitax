@@ -1,27 +1,12 @@
 import frappe
 from frappe.utils.password import get_decrypted_password
 
-def get_digitax_credentials(company=None):
-    """Return (base_url, api_key) for a company.
-
-    company=None keeps the pre-multi-company behaviour of using the global
-    Digitax Settings values, so callers can be migrated one at a time.
-    """
+def get_digitax_credentials(company):
+    """Return (base_url, api_key) for a company. Every DigiTax setting is per-company."""
     from titan_digitax.titan_digitax.utils.company_config import get_digitax_company_config
 
-    try:
-        cfg = get_digitax_company_config(company)
-        return cfg.base_url, cfg.api_key
-    except frappe.ValidationError:
-        # Strict mode refusing to fall back to the global key — must reach the caller.
-        raise
-    except Exception as e:
-        frappe.msgprint("Error fetching Digitax credentials. Check error log for details.")
-        frappe.log_error(
-            f"Error fetching Digitax credentials for {company or 'global'}: {str(e)}",
-            "Digitax Utils",
-        )
-        return None, None
+    cfg = get_digitax_company_config(company)
+    return cfg.base_url, cfg.api_key
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def digitax_callback_sales_with_items():

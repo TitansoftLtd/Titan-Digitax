@@ -59,7 +59,7 @@ def get_digitax_id(item_code: str, company: str) -> str | None:
 	return legacy or None
 
 
-def get_display_name(item_code: str, company: str | None = None, digitax_settings=None) -> str | None:
+def get_display_name(item_code: str, company: str, digitax_settings=None) -> str | None:
 	"""Name sent to DigiTax for an item, honouring D14's require_digitax_item_name.
 
 	Resolution order: this company's registration override, then the Item's own
@@ -68,8 +68,11 @@ def get_display_name(item_code: str, company: str | None = None, digitax_setting
 	if not item_code:
 		return None
 
-	settings = digitax_settings or frappe.get_cached_doc("Digitax Settings")
-	require_name = bool(settings.get("require_digitax_item_name"))
+	if digitax_settings is None:
+		from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
+
+		digitax_settings = get_digitax_settings(company)
+	require_name = bool(digitax_settings.get("require_digitax_item_name"))
 
 	if company:
 		reg = get_registration(item_code, company)
