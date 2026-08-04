@@ -5,7 +5,11 @@ from datetime import datetime, timezone
 from frappe import _
 from frappe.utils import now_datetime
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
-from .company_config import is_digitax_enabled_for_company, get_enabled_digitax_companies
+from .company_config import (
+    is_digitax_enabled_for_company,
+    get_enabled_digitax_companies,
+    get_digitax_settings,
+)
 from .sales_items import build_digitax_items_payload
 
 
@@ -31,37 +35,31 @@ def send_sales_invoice_to_digitax(docname):
         logger.error(f"Failed to get Sales Invoice document: {str(e)}")
         return {"error": "Failed to load invoice", "message": str(e)}
 
-    # Load Digitax Settings first (needed for all subsequent checks)
-    try:
-        digitax_settings = frappe.get_single("Digitax Settings")
-        logger.info(f"Digitax Settings loaded successfully")
-        
-        # If not enabled, skip silently (no error log, no processing)
-        if not digitax_settings.get("enable"):
-            logger.info(f"Skipping: Digitax integration disabled in settings")
-            return {"skipped": True, "reason": "Digitax integration disabled"}
-            
-    except Exception as e:
-        logger.warning(f"Could not access Digitax Settings: {str(e)}")
-        return {"error": "Digitax Settings not accessible", "message": str(e)}
+    # Load this company's Digitax Company Settings first (needed for all subsequent checks)
+    if not frappe.db.exists("Digitax Company Settings", doc.company):
+        logger.info(f"Skipping: No Digitax Company Settings configured for {doc.company}")
+        return {"skipped": True, "reason": "Digitax not configured for this company"}
 
-    # Check company country against target country from settings
+    digitax_settings = get_digitax_settings(doc.company)
+    logger.info(f"Digitax Company Settings loaded for {doc.company}")
+
+    # Check company country against this company's own target country
     company_country = frappe.db.get_value("Company", doc.company, "country")
     target_country = digitax_settings.get("target_country") or "Kenya"
     logger.info(f"Company Country Check: {company_country}, Target: {target_country}")
     if not company_country == target_country:
         logger.info(f"Skipping: Company not in {target_country} (Country: {company_country})")
         return {"skipped": True, "reason": f"Company not in {target_country}"}
-    
-    # Check if this company has an enabled row in Digitax Settings.
+
+    # Check if this company is enabled for DigiTax.
     # Credit notes (is_return=1) and invoices that already have a custom_sale_id are allowed
     # through regardless so that reversals and amendments never get blocked even when a company
     # is later disabled (send-block, amend-allow policy).
     is_amendment_or_return = bool(doc.is_return or doc.get("custom_sale_id"))
     if not is_amendment_or_return:
-        if not is_digitax_enabled_for_company(doc.company, digitax_settings):
-            logger.info(f"Skipping: Company {doc.company} has no enabled row in Digitax Settings")
-            return {"skipped": True, "reason": "Company not enabled in Digitax Settings"}
+        if not is_digitax_enabled_for_company(doc.company):
+            logger.info(f"Skipping: Company {doc.company} is not enabled for Digitax")
+            return {"skipped": True, "reason": "Company not enabled for Digitax"}
     else:
         logger.info(f"Company eligibility check bypassed for credit note / amendment (is_return={doc.is_return}, custom_sale_id={doc.get('custom_sale_id')})")
 
@@ -215,44 +213,46 @@ def send_sales_invoice_to_digitax(docname):
 
 @frappe.whitelist()
 def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from_date=None, to_date=None, retry_count=None):
-    digitax_settings = frappe.get_single("Digitax Settings")
-    target_country = digitax_settings.get("target_country") or "Kenya"
-    
-    # Get max retry attempts from settings if not provided (ensure it's an int and positive)
-    if retry_count is None:
-        try:
-            retry_count = int(digitax_settings.get("max_retry_attempts") or 5)
-            if retry_count <= 0:
-                retry_count = 5  # Fallback to default if invalid
-        except (ValueError, TypeError):
-            retry_count = 5  # Fallback if conversion fails
-    
-    # Use the Digitax-owned enablement table rather than Company.custom_enable_company,
-    # intersected with target_country as a defensive backstop.
-    target_country_companies = set(frappe.get_all(
-        "Company", filters={"country": target_country, "is_group": 0}, pluck="name"
-    ))
-    valid_companies = [
-        c for c in get_enabled_digitax_companies(digitax_settings)
-        if c in target_country_companies
-    ]
-    filters = {
-        "docstatus": 1,
-        "custom_sent_to_digitax": 0,
-        "company": ["in", valid_companies],
-        "custom_retry_count": ["<", retry_count],
-    }
-    if invoice_name:
-        filters["name"] = invoice_name
-    if from_date and to_date:
-        filters["posting_date"] = ["between", [from_date, to_date]]
-    if company:
-        filters["company"] = company
-    
-    invoices = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
+    # Every setting (target country, max retries) is per company now, so each company's
+    # invoices are queried separately using that company's own values rather than one
+    # combined query spanning every enabled company.
+    companies = [company] if company else get_enabled_digitax_companies()
 
-    for invoice in invoices:
-        send_sales_invoice_to_digitax(invoice)
+    for comp in companies:
+        if not is_digitax_enabled_for_company(comp):
+            continue
+
+        settings = get_digitax_settings(comp)
+        target_country = settings.get("target_country") or "Kenya"
+        company_country = frappe.db.get_value("Company", comp, "country")
+        if company_country != target_country:
+            continue
+
+        if retry_count is None:
+            try:
+                comp_retry_count = int(settings.get("max_retry_attempts") or 5)
+                if comp_retry_count <= 0:
+                    comp_retry_count = 5  # Fallback to default if invalid
+            except (ValueError, TypeError):
+                comp_retry_count = 5  # Fallback if conversion fails
+        else:
+            comp_retry_count = retry_count
+
+        filters = {
+            "docstatus": 1,
+            "custom_sent_to_digitax": 0,
+            "company": comp,
+            "custom_retry_count": ["<", comp_retry_count],
+        }
+        if invoice_name:
+            filters["name"] = invoice_name
+        if from_date and to_date:
+            filters["posting_date"] = ["between", [from_date, to_date]]
+
+        invoices = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
+
+        for invoice in invoices:
+            send_sales_invoice_to_digitax(invoice)
 
 @frappe.whitelist()
 def job_retry_sending_sales_invoices():
@@ -263,22 +263,25 @@ def job_retry_sending_sales_invoices():
             "reason": "Digitax sync is disabled in site configuration"
         }
     
-    # Get background job timeout from settings (ensure it's an int and positive)
-    digitax_settings = frappe.get_single("Digitax Settings")
-    try:
-        job_timeout = int(digitax_settings.get("background_job_timeout") or 600)
-        if job_timeout <= 0:
-            job_timeout = 600  # Fallback to default if invalid
-    except (ValueError, TypeError):
-        job_timeout = 600  # Fallback if conversion fails
-    
+    # Size the job for the slowest-configured enabled company, since this one job
+    # retries invoices across every company in a single sweep.
+    job_timeout = 600
+    for comp in get_enabled_digitax_companies():
+        settings = get_digitax_settings(comp)
+        try:
+            comp_timeout = int(settings.get("background_job_timeout") or 600)
+            if comp_timeout > job_timeout:
+                job_timeout = comp_timeout
+        except (ValueError, TypeError):
+            pass
+
     frappe.enqueue(
         retry_sending_sales_invoice_to_digitax,
         queue="default",
         timeout=job_timeout,
     )
 
-def fetch_sale_details_from_digitax(sale_id, company=None):
+def fetch_sale_details_from_digitax(sale_id, company):
     """
     Fetch full sale/credit note details from Digitax API using sale_id.
     Note: The same endpoint is used for both invoices and credit notes.
@@ -298,8 +301,8 @@ def fetch_sale_details_from_digitax(sale_id, company=None):
             logger.error("Digitax credentials not configured")
             return None
         
-        # Get API timeout from settings (ensure it's an int and positive)
-        digitax_settings = frappe.get_single("Digitax Settings")
+        # Get API timeout from this company's settings (ensure it's an int and positive)
+        digitax_settings = get_digitax_settings(company)
         try:
             api_timeout = int(digitax_settings.get("api_request_timeout") or 30)
             if api_timeout <= 0:
@@ -651,7 +654,7 @@ def _validate_virtual_amendment_user(digitax_settings):
     role = digitax_settings.get("virtual_amendment_role")
     if not role:
         frappe.throw(
-            _("Set Virtual Amendment Role in Digitax Settings before using virtual amendments."),
+            _("Set Virtual Amendment Role in this company's Digitax Company Settings before using virtual amendments."),
             title=_("Digitax Role Not Configured"),
         )
 
@@ -681,10 +684,9 @@ def _validate_virtual_amendment_invoice(doc):
 
 
 def _load_virtual_amendment_context(invoice_name):
-    digitax_settings = frappe.get_single("Digitax Settings")
-    _validate_virtual_amendment_user(digitax_settings)
-
     doc = frappe.get_doc("Sales Invoice", invoice_name)
+    digitax_settings = get_digitax_settings(doc.company)
+    _validate_virtual_amendment_user(digitax_settings)
     _validate_virtual_amendment_invoice(doc)
 
     return doc, digitax_settings
@@ -1012,9 +1014,9 @@ def _build_virtual_sale_preview(doc, state, correction_reason):
 
 @frappe.whitelist()
 def get_digitax_virtual_amendment_status(invoice_name):
-    digitax_settings = frappe.get_single("Digitax Settings")
-    role = digitax_settings.get("virtual_amendment_role")
     doc = frappe.get_doc("Sales Invoice", invoice_name)
+    digitax_settings = get_digitax_settings(doc.company)
+    role = digitax_settings.get("virtual_amendment_role")
 
     can_create = bool(
         role

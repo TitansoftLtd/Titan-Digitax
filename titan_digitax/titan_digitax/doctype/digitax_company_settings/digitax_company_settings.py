@@ -18,7 +18,7 @@ class DigitaxCompanySettings(Document):
 		frappe.clear_cache(doctype="Digitax Company Settings")
 
 	def _validate_company_country(self):
-		"""Mirror the check Digitax Settings applies to its own company rows."""
+		"""A company can only file to DigiTax if it's in its own configured target country."""
 		if not self.enabled or not self.company:
 			return
 
@@ -27,12 +27,11 @@ class DigitaxCompanySettings(Document):
 				_("{0} is a group company and cannot file to DigiTax.").format(frappe.bold(self.company))
 			)
 
-		target = frappe.db.get_single_value("Digitax Settings", "target_country")
 		country = frappe.db.get_value("Company", self.company, "country")
-		if target and country and country != target:
+		if self.target_country and country and country != self.target_country:
 			frappe.throw(
-				_("{0} is in {1}, but Digitax Settings targets {2}.").format(
-					frappe.bold(self.company), frappe.bold(country), frappe.bold(target)
+				_("{0} is in {1}, but this Digitax Company Settings row targets {2}.").format(
+					frappe.bold(self.company), frappe.bold(country), frappe.bold(self.target_country)
 				)
 			)
 

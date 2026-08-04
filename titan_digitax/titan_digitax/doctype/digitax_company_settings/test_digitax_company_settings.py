@@ -1,4 +1,4 @@
-# Copyright (c) 2025, Titansoft Limited and Contributors
+# Copyright (c) 2026, Titansoft Limited and Contributors
 # See license.txt
 
 from unittest.mock import MagicMock, patch
@@ -51,19 +51,22 @@ def _ensure_company(company):
     ).insert(ignore_permissions=True)
 
 
-def _make_company_settings_doc(company, enabled=1):
+def _make_company_settings_doc(company, enabled=1, **extra):
     """Create (or update) a Digitax Company Settings row for a test company.
 
-    Per-company eligibility is a real DocType now (Digitax Company Settings), not a
-    child table on the Digitax Settings Single, so these tests exercise it directly
-    against the database. Idempotent by company name: successive test methods within
-    the same run share a connection, and records created by an earlier method remain
-    visible to a later one, so a blind insert() would hit a duplicate primary key.
+    Every DigiTax setting is per company now, with no shared/global tier, so
+    base_url and api_key are mandatory on every row — these tests supply
+    throwaway values since no test here actually calls the real DigiTax API.
+    Idempotent by company name: successive test methods within the same run share
+    a connection, and records created by an earlier method remain visible to a
+    later one, so a blind insert() would hit a duplicate primary key.
     """
     _ensure_company(company)
     if frappe.db.exists("Digitax Company Settings", company):
         doc = frappe.get_doc("Digitax Company Settings", company)
         doc.enabled = enabled
+        for field, value in extra.items():
+            doc.set(field, value)
         doc.save(ignore_permissions=True)
         return doc
 
@@ -72,6 +75,9 @@ def _make_company_settings_doc(company, enabled=1):
             "doctype": "Digitax Company Settings",
             "company": company,
             "enabled": enabled,
+            "base_url": "https://sandbox.digitax.test/api/v1",
+            "api_key": "test-api-key",
+            **extra,
         }
     )
     doc.insert(ignore_permissions=True)
@@ -118,7 +124,9 @@ class TestDigitaxCompanySettingsValidation(FrappeTestCase):
     This validation used to live on the Digitax Settings Single's
     company_configurations child table (_validate_company_configurations); it moved
     to DigitaxCompanySettings._validate_company_country when that table was retired
-    in favour of a standalone per-company doctype (D15/D18, mirroring Engage Settings).
+    in favour of a standalone per-company doctype (D15/D18, mirroring Engage Settings),
+    and target_country itself later moved from the (now deleted) Digitax Settings
+    Single onto this doctype so every row is fully self-contained.
 
     Real Company records are used rather than mocking frappe.db.get_value: that call
     is not module-scoped, so a global mock also intercepts the framework's own
@@ -139,19 +147,29 @@ class TestDigitaxCompanySettingsValidation(FrappeTestCase):
     def test_enabled_group_company_raises(self):
         company = self._make_group_company("__test_group__")
         doc = frappe.get_doc(
-            {"doctype": "Digitax Company Settings", "company": company, "enabled": 1}
+            {
+                "doctype": "Digitax Company Settings",
+                "company": company,
+                "enabled": 1,
+                "base_url": "https://sandbox.digitax.test/api/v1",
+                "api_key": "test-api-key",
+            }
         )
         with self.assertRaises(frappe.ValidationError):
             doc.validate()
 
     def test_enabled_non_target_country_raises(self):
-        # _validate_company_country skips the check entirely when target_country is
-        # unset, so pin it explicitly rather than trust whatever the site has.
-        frappe.db.set_single_value("Digitax Settings", "target_country", "Kenya")
         company = self._make_leaf_company("__test_other_country__", "Uganda")
 
         doc = frappe.get_doc(
-            {"doctype": "Digitax Company Settings", "company": company, "enabled": 1}
+            {
+                "doctype": "Digitax Company Settings",
+                "company": company,
+                "enabled": 1,
+                "base_url": "https://sandbox.digitax.test/api/v1",
+                "api_key": "test-api-key",
+                "target_country": "Kenya",
+            }
         )
         with self.assertRaises(frappe.ValidationError):
             doc.validate()
@@ -160,7 +178,13 @@ class TestDigitaxCompanySettingsValidation(FrappeTestCase):
         # A group company would raise if checked; disabled rows are exempt.
         company = self._make_group_company("__test_disabled_group__")
         doc = frappe.get_doc(
-            {"doctype": "Digitax Company Settings", "company": company, "enabled": 0}
+            {
+                "doctype": "Digitax Company Settings",
+                "company": company,
+                "enabled": 0,
+                "base_url": "https://sandbox.digitax.test/api/v1",
+                "api_key": "test-api-key",
+            }
         )
         doc.validate()  # should not raise
 
@@ -168,43 +192,30 @@ class TestDigitaxCompanySettingsValidation(FrappeTestCase):
 class TestSendInvoiceEligibility(FrappeTestCase):
     """Integration-style tests for send_sales_invoice_to_digitax eligibility gating."""
 
-    def _mock_digitax_settings(self, enable=1, target_country="Kenya"):
-        settings = MagicMock()
-        settings.get.side_effect = lambda key, *args: (
-            enable if key == "enable" else target_country if key == "target_country" else None
-        )
-        return settings
-
     @patch("frappe.conf", new_callable=lambda: _mock_conf())
     @patch("titan_digitax.titan_digitax.utils.sales._post_to_digitax")
-    @patch("titan_digitax.titan_digitax.utils.sales.frappe.get_single")
     @patch("titan_digitax.titan_digitax.utils.sales.frappe.get_doc")
-    def test_no_row_skips_send(self, mock_get_doc, mock_get_single, mock_post, _conf):
+    def test_no_row_skips_send(self, mock_get_doc, mock_post, _conf):
         """Invoice for a company with no Digitax Company Settings row is skipped."""
-        mock_get_single.return_value = self._mock_digitax_settings()
-
         mock_doc = MagicMock()
-        mock_doc.company = "Acme Kenya"
+        mock_doc.company = "__no_digitax_settings_company__"
         mock_doc.is_return = 0
         mock_doc.get.return_value = None  # no custom_sale_id
         mock_doc.custom_sale_id = None
         mock_doc.custom_error_message = None
         mock_get_doc.return_value = mock_doc
 
-        with patch("titan_digitax.titan_digitax.utils.sales.frappe.db.get_value", return_value="Kenya"):
-            from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax
-            result = send_sales_invoice_to_digitax("SI-TEST-001")
+        from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax
+        result = send_sales_invoice_to_digitax("SI-TEST-001")
 
         self.assertTrue(result.get("skipped"))
         mock_post.assert_not_called()
 
     @patch("frappe.conf", new_callable=lambda: _mock_conf())
     @patch("titan_digitax.titan_digitax.utils.sales._post_to_digitax")
-    @patch("titan_digitax.titan_digitax.utils.sales.frappe.get_single")
     @patch("titan_digitax.titan_digitax.utils.sales.frappe.get_doc")
-    def test_disabled_row_skips_send(self, mock_get_doc, mock_get_single, mock_post, _conf):
+    def test_disabled_row_skips_send(self, mock_get_doc, mock_post, _conf):
         """Invoice for a company with a disabled Digitax Company Settings row is skipped."""
-        mock_get_single.return_value = self._mock_digitax_settings()
         _make_company_settings_doc("Acme Kenya", enabled=0)
 
         mock_doc = MagicMock()
@@ -225,10 +236,9 @@ class TestSendInvoiceEligibility(FrappeTestCase):
     @patch("frappe.conf", new_callable=lambda: _mock_conf())
     @patch("titan_digitax.titan_digitax.utils.sales.build_digitax_items_payload")
     @patch("titan_digitax.titan_digitax.utils.sales._post_to_digitax")
-    @patch("titan_digitax.titan_digitax.utils.sales.frappe.get_single")
     @patch("titan_digitax.titan_digitax.utils.sales.frappe.get_doc")
     def test_credit_note_allowed_even_when_row_disabled(
-        self, mock_get_doc, mock_get_single, mock_post, mock_build_items, _conf
+        self, mock_get_doc, mock_post, mock_build_items, _conf
     ):
         """Credit note against an already-sent invoice bypasses the company row check.
 
@@ -237,7 +247,6 @@ class TestSendInvoiceEligibility(FrappeTestCase):
         own dedicated coverage.
         """
         mock_build_items.return_value = {"ok": True, "items": [{"item_name": "Test Item"}]}
-        mock_get_single.return_value = self._mock_digitax_settings()
         _make_company_settings_doc("Acme Kenya", enabled=0)
 
         mock_doc = MagicMock()

@@ -12,25 +12,30 @@ class DigitaxSyncJob(Document):
 
 
 @frappe.whitelist()
-def execute_digitax_sync(sync_type=None):
+def execute_digitax_sync(sync_type=None, company=None):
 	"""
 	Entry point for UI-triggered sync.
 	Updates the single DocType record and enqueues background task.
-	
+
 	Args:
 		sync_type: The type of sync to execute (Customers or Items)
+		company: The company whose Digitax Company Settings to sync with
 	"""
 	# Validate sync type is provided and not empty
 	if not sync_type or sync_type.strip() == "":
 		frappe.throw("Please select a Sync Type before executing.")
-	
+
+	if not company:
+		frappe.throw("Please select a Company before executing.")
+
 	# Validate sync type is a valid option
 	valid_types = ["Customers", "Items"]
 	if sync_type not in valid_types:
 		frappe.throw(f"Invalid sync type: {sync_type}. Must be one of: {', '.join(valid_types)}")
-	
+
 	# Update status fields in the single document
 	frappe.db.set_single_value("Digitax Sync Job", {
+		"company": company,
 		"status": "Running",
 		"started_at": now_datetime(),
 		"finished_at": None,
@@ -39,21 +44,22 @@ def execute_digitax_sync(sync_type=None):
 		"job_id": None
 	})
 	frappe.db.commit()
-	
+
 	# Enqueue background job
 	job_id = frappe.enqueue(
 		"titan_digitax.titan_digitax.doctype.digitax_sync_job.digitax_sync_job.run_digitax_sync_background",
 		queue="long",
 		timeout=3600,
 		job_name=f"digitax_sync_{sync_type.lower()}",
-		sync_type=sync_type
+		sync_type=sync_type,
+		company=company,
 	)
-	
+
 	# Save job ID (convert Job object to string)
 	job_id_str = str(job_id.id) if hasattr(job_id, 'id') else str(job_id)
 	frappe.db.set_single_value("Digitax Sync Job", "job_id", job_id_str)
 	frappe.db.commit()
-	
+
 	return {
 		"status": "success",
 		"message": f"Sync job started for {sync_type}. Refresh to monitor status.",
@@ -61,15 +67,15 @@ def execute_digitax_sync(sync_type=None):
 	}
 
 
-def run_digitax_sync_background(sync_type):
+def run_digitax_sync_background(sync_type, company):
 	"""
 	Background worker for UI-triggered sync.
 	Updates the single DocType document with results.
 	"""
 	try:
 		# Call core sync function
-		result = run_digitax_sync(sync_type)
-		
+		result = run_digitax_sync(sync_type, company)
+
 		# Update job as completed
 		frappe.db.set_single_value("Digitax Sync Job", {
 			"status": "Completed",
@@ -77,12 +83,12 @@ def run_digitax_sync_background(sync_type):
 			"last_result": result.get("summary", "Sync completed successfully.")
 		})
 		frappe.db.commit()
-		
+
 	except Exception as e:
 		# Update job as failed
 		import traceback
 		error_trace = traceback.format_exc()
-		
+
 		frappe.db.set_single_value("Digitax Sync Job", {
 			"status": "Failed",
 			"finished_at": now_datetime(),
@@ -90,7 +96,7 @@ def run_digitax_sync_background(sync_type):
 			"error_traceback": error_trace
 		})
 		frappe.db.commit()
-		
+
 		# Log error
 		frappe.log_error(
 			title=f"Digitax Sync Failed - {sync_type}",
@@ -98,38 +104,39 @@ def run_digitax_sync_background(sync_type):
 		)
 
 
-def run_digitax_sync(sync_type, start_time=None, end_time=None):
+def run_digitax_sync(sync_type, company, start_time=None, end_time=None):
 	"""
 	Core sync function that can be called by UI or scheduler.
-	
+
 	Args:
 		sync_type: "Customers" or "Items"
+		company: The company whose Digitax Company Settings to sync with
 		start_time: Optional datetime for filtering (used by scheduler)
 		end_time: Optional datetime for filtering (used by scheduler)
-	
+
 	Returns:
 		dict with summary of sync results
 	"""
-	frappe.logger().info(f"Starting Digitax sync for type: {sync_type}")
-	
+	frappe.logger().info(f"Starting Digitax sync for type: {sync_type}, company: {company}")
+
 	# Route to specific sync handler
 	if sync_type == "Customers":
-		return sync_customers_from_digitax(start_time, end_time)
+		return sync_customers_from_digitax(company, start_time, end_time)
 	elif sync_type == "Items":
-		return sync_items_from_digitax(start_time, end_time)
+		return sync_items_from_digitax(company, start_time, end_time)
 	else:
 		frappe.throw(f"Unknown sync type: {sync_type}")
 
 
-def sync_customers_from_digitax(start_time=None, end_time=None):
+def sync_customers_from_digitax(company, start_time=None, end_time=None):
 	"""
 	Sync customers from Digitax to ERPNext.
-	
+
 	TODO: Implement when Digitax customer endpoint is provided.
 	"""
 	from titan_digitax.titan_digitax.utils.digitax_client import DigitaxClient
-	
-	client = DigitaxClient()
+
+	client = DigitaxClient(company)
 	
 	# Placeholder - will be implemented when endpoint is provided
 	customers = client.fetch_customers(start_time, end_time)
@@ -385,26 +392,27 @@ def get_or_create_digitax_item(item_data):
 			return {"status": "exists", "item_name": item_name}
 
 
-def sync_items_from_digitax(start_time=None, end_time=None):
+def sync_items_from_digitax(company, start_time=None, end_time=None):
 	"""
 	Sync items from Digitax to ERPNext.
-	
+
 	Fetches items from Digitax API and creates/updates them using get_or_create_digitax_item.
-	
+
 	Args:
+		company: The company whose Digitax Company Settings to sync with
 		start_time: Optional filter for items modified after this time
 		end_time: Optional filter for items modified before this time
-	
+
 	Returns:
 		dict: Summary with created, updated, skipped, and error counts
 	"""
 	from titan_digitax.titan_digitax.utils.digitax_client import DigitaxClient
-	
+
 	frappe.logger().info("=" * 80)
-	frappe.logger().info("DIGITAX ITEM SYNC: Starting sync from Digitax")
+	frappe.logger().info(f"DIGITAX ITEM SYNC: Starting sync from Digitax for {company}")
 	frappe.logger().info("=" * 80)
-	
-	client = DigitaxClient()
+
+	client = DigitaxClient(company)
 	
 	# Fetch items from Digitax
 	try:
@@ -480,47 +488,44 @@ def sync_items_from_digitax(start_time=None, end_time=None):
 def digitax_sync_customers_hourly():
 	"""
 	Hourly scheduler entry point for customer sync.
-	Pulls customers from last 1 hour.
+	Pulls customers from last 1 hour, once per enabled company.
 	"""
 	from datetime import timedelta
 	from frappe.utils import now_datetime
-	
+	from titan_digitax.titan_digitax.utils.company_config import get_enabled_digitax_companies
+
 	end_time = now_datetime()
 	start_time = end_time - timedelta(hours=1)
-	
-	try:
-		result = run_digitax_sync("Customers", start_time, end_time)
-		frappe.logger().info(f"Scheduled customer sync completed: {result.get('summary')}")
-	except Exception as e:
-		frappe.log_error(
-			title="Scheduled Digitax Customer Sync Failed",
-			message=frappe.get_traceback()
-		)
+
+	for company in get_enabled_digitax_companies():
+		try:
+			result = run_digitax_sync("Customers", company, start_time, end_time)
+			frappe.logger().info(f"Scheduled customer sync completed for {company}: {result.get('summary')}")
+		except Exception as e:
+			frappe.log_error(
+				title=f"Scheduled Digitax Customer Sync Failed - {company}",
+				message=frappe.get_traceback()
+			)
 
 
 def digitax_sync_items_hourly():
 	"""
 	Hourly scheduler entry point for items sync.
-	Pulls items from last 1 hour.
+	Pulls items from last 1 hour, once per enabled company.
 	"""
 	from datetime import timedelta
 	from frappe.utils import now_datetime
-
-	try:
-		settings = frappe.get_single("Digitax Settings")
-		if not settings.get("enable"):
-			return
-	except Exception:
-		return
+	from titan_digitax.titan_digitax.utils.company_config import get_enabled_digitax_companies
 
 	end_time = now_datetime()
 	start_time = end_time - timedelta(hours=1)
 
-	try:
-		result = run_digitax_sync("Items", start_time, end_time)
-		frappe.logger().info(f"Scheduled items sync completed: {result.get('summary')}")
-	except Exception as e:
-		frappe.log_error(
-			title="Scheduled Digitax Items Sync Failed",
-			message=frappe.get_traceback()
-		)
+	for company in get_enabled_digitax_companies():
+		try:
+			result = run_digitax_sync("Items", company, start_time, end_time)
+			frappe.logger().info(f"Scheduled items sync completed for {company}: {result.get('summary')}")
+		except Exception as e:
+			frappe.log_error(
+				title=f"Scheduled Digitax Items Sync Failed - {company}",
+				message=frappe.get_traceback()
+			)

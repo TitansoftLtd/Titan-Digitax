@@ -14,7 +14,39 @@
   "api_key",
   "column_break_credentials",
   "api_key_fingerprint",
-  "callback_token"
+  "callback_token",
+  "digitax_options_section",
+  "target_country",
+  "api_request_timeout",
+  "max_retry_attempts",
+  "background_job_timeout",
+  "item_sync_overrides_section",
+  "require_digitax_item_name",
+  "require_manual_item_sync",
+  "column_break_d14",
+  "auto_sync_items_to_digitax",
+  "virtual_amendments_section",
+  "virtual_amendment_role",
+  "default_item_settings_section",
+  "default_item_class_code",
+  "default_item_type_code",
+  "default_item_tax_type_code",
+  "column_break_items",
+  "default_origin_nation_code",
+  "default_package_unit_code",
+  "default_quantity_unit_code",
+  "school_fees_item_section",
+  "default_item_bar_code",
+  "default_item_name",
+  "column_break_school_fees",
+  "default_item_description",
+  "default_is_stockable",
+  "invoice_status_codes_section",
+  "submitted_invoice_status_code",
+  "default_receipt_type_code",
+  "column_break_status",
+  "cancelled_invoice_status_code",
+  "default_payment_type_code"
  ],
  "fields": [
   {
@@ -45,23 +77,25 @@
    "label": "Description"
   },
   {
-   "description": "Each company files under its own KRA account. Leave blank to inherit the global Digitax Settings value — permitted for Base URL, but an inherited API Key is refused once Strict Per-Company Credentials is on.",
+   "description": "Each company files under its own KRA account. Every field on this doctype belongs to this company alone — there is no shared/global DigiTax configuration.",
    "fieldname": "credentials_section",
    "fieldtype": "Section Break",
    "label": "DigiTax Credentials"
   },
   {
-   "description": "Blank inherits Digitax Settings.base_url.",
+   "description": "This company's DigiTax API host, e.g. https://api.digitax.tech/ke/v2",
    "fieldname": "base_url",
    "fieldtype": "Data",
    "label": "Base URL",
-   "options": "URL"
+   "options": "URL",
+   "reqd": 1
   },
   {
-   "description": "This company's own X-API-Key. Blank inherits the global key only while strict mode is off.",
+   "description": "This company's X-API-Key, sent on every request to DigiTax.",
    "fieldname": "api_key",
    "fieldtype": "Password",
-   "label": "API Key"
+   "label": "API Key",
+   "reqd": 1
   },
   {
    "fieldname": "column_break_credentials",
@@ -80,6 +114,209 @@
    "fieldname": "callback_token",
    "fieldtype": "Password",
    "label": "Callback Token"
+  },
+  {
+   "fieldname": "digitax_options_section",
+   "fieldtype": "Section Break",
+   "label": "Digitax Options"
+  },
+  {
+   "default": "Kenya",
+   "description": "Invoices are only sent to DigiTax if this company's country matches this value.",
+   "fieldname": "target_country",
+   "fieldtype": "Link",
+   "label": "Target Country",
+   "options": "Country"
+  },
+  {
+   "default": "30",
+   "description": "Timeout for API requests in seconds (default: 30)",
+   "fieldname": "api_request_timeout",
+   "fieldtype": "Int",
+   "label": "API Request Timeout (seconds)"
+  },
+  {
+   "default": "5",
+   "description": "Maximum number of retry attempts for failed invoices (default: 5)",
+   "fieldname": "max_retry_attempts",
+   "fieldtype": "Int",
+   "label": "Max Retry Attempts"
+  },
+  {
+   "default": "600",
+   "description": "Timeout for background retry jobs in seconds (default: 600 = 10 minutes)",
+   "fieldname": "background_job_timeout",
+   "fieldtype": "Int",
+   "label": "Background Job Timeout (seconds)"
+  },
+  {
+   "description": "D14 gates for DigiTax send. St. Austin defaults: require Digitax Item Name ON, require manual sync ON, auto-sync OFF.",
+   "fieldname": "item_sync_overrides_section",
+   "fieldtype": "Section Break",
+   "label": "Item Sync Overrides"
+  },
+  {
+   "default": "1",
+   "description": "When ON, every SI line Item must have Digitax Item Name; DigiTax receives that name only (never ERP item name).",
+   "fieldname": "require_digitax_item_name",
+   "fieldtype": "Check",
+   "label": "Require Digitax Item Name"
+  },
+  {
+   "default": "1",
+   "description": "When ON, DigiTax send blocks unless Item already has custom_digitax_id (manual Sync to Digitax).",
+   "fieldname": "require_manual_item_sync",
+   "fieldtype": "Check",
+   "label": "Require Manual Item Sync"
+  },
+  {
+   "fieldname": "column_break_d14",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "When ON, missing DigiTax IDs may be auto-created/reused by display name during send. Not for St. Austin default.",
+   "fieldname": "auto_sync_items_to_digitax",
+   "fieldtype": "Check",
+   "label": "Auto Sync Items to Digitax"
+  },
+  {
+   "fieldname": "virtual_amendments_section",
+   "fieldtype": "Section Break",
+   "label": "Virtual Amendments"
+  },
+  {
+   "description": "Only users with this role can preview and send Digitax virtual amendments for this company.",
+   "fieldname": "virtual_amendment_role",
+   "fieldtype": "Link",
+   "label": "Virtual Amendment Role",
+   "options": "Role"
+  },
+  {
+   "fieldname": "default_item_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Default Item Settings"
+  },
+  {
+   "default": "99020000",
+   "description": "Fallback item class code when not specified on item (default: 99020000)",
+   "fieldname": "default_item_class_code",
+   "fieldtype": "Data",
+   "label": "Default Item Class Code"
+  },
+  {
+   "default": "3",
+   "description": "Fallback item type code for DigiTax item create (default: 3)",
+   "fieldname": "default_item_type_code",
+   "fieldtype": "Data",
+   "label": "Default Item Type Code"
+  },
+  {
+   "default": "D",
+   "description": "Fallback tax type code when not specified on item (default: D)",
+   "fieldname": "default_item_tax_type_code",
+   "fieldtype": "Select",
+   "label": "Default Item Tax Type Code",
+   "options": "\nA\nB\nC\nD\nE"
+  },
+  {
+   "fieldname": "column_break_items",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "KE",
+   "description": "Fallback origin nation code for DigiTax item create (default: KE)",
+   "fieldname": "default_origin_nation_code",
+   "fieldtype": "Data",
+   "label": "Default Origin Nation Code"
+  },
+  {
+   "default": "NT",
+   "description": "Fallback package unit code for DigiTax item create (default: NT)",
+   "fieldname": "default_package_unit_code",
+   "fieldtype": "Data",
+   "label": "Default Package Unit Code"
+  },
+  {
+   "default": "U",
+   "description": "Fallback quantity unit code for DigiTax item create (default: U)",
+   "fieldname": "default_quantity_unit_code",
+   "fieldtype": "Data",
+   "label": "Default Quantity Unit Code"
+  },
+  {
+   "fieldname": "school_fees_item_section",
+   "fieldtype": "Section Break",
+   "label": "School Fees Item Details"
+  },
+  {
+   "default": "SCHOOL_FEES",
+   "description": "Default item bar code for school fees (default: SCHOOL_FEES)",
+   "fieldname": "default_item_bar_code",
+   "fieldtype": "Data",
+   "label": "Default Item Bar Code"
+  },
+  {
+   "default": "School Fees",
+   "description": "Default item name for school fees (default: School Fees)",
+   "fieldname": "default_item_name",
+   "fieldtype": "Data",
+   "label": "Default Item Name"
+  },
+  {
+   "fieldname": "column_break_school_fees",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "School Fees",
+   "description": "Default item description for school fees (default: School Fees)",
+   "fieldname": "default_item_description",
+   "fieldtype": "Data",
+   "label": "Default Item Description"
+  },
+  {
+   "default": "0",
+   "description": "Whether the default item is stockable (default: No)",
+   "fieldname": "default_is_stockable",
+   "fieldtype": "Check",
+   "label": "Default Is Stockable"
+  },
+  {
+   "fieldname": "invoice_status_codes_section",
+   "fieldtype": "Section Break",
+   "label": "Invoice Status Codes"
+  },
+  {
+   "default": "02",
+   "description": "Status code for submitted invoices (default: 02)",
+   "fieldname": "submitted_invoice_status_code",
+   "fieldtype": "Data",
+   "label": "Submitted Invoice Status Code"
+  },
+  {
+   "default": "S",
+   "description": "Receipt type code for sales invoices (default: S)",
+   "fieldname": "default_receipt_type_code",
+   "fieldtype": "Data",
+   "label": "Default Receipt Type Code"
+  },
+  {
+   "fieldname": "column_break_status",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "04",
+   "description": "Status code for cancelled/draft invoices (default: 04)",
+   "fieldname": "cancelled_invoice_status_code",
+   "fieldtype": "Data",
+   "label": "Cancelled Invoice Status Code"
+  },
+  {
+   "default": "01",
+   "description": "Payment type code for invoices (default: 01 = Cash)",
+   "fieldname": "default_payment_type_code",
+   "fieldtype": "Data",
+   "label": "Default Payment Type Code"
   }
  ],
  "index_web_pages_for_search": 1,

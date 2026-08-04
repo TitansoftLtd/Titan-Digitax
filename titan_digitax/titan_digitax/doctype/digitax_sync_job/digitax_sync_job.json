@@ -4,6 +4,7 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "company",
   "sync_type",
   "column_break_1",
   "status",
@@ -17,6 +18,14 @@
   "error_traceback"
  ],
  "fields": [
+  {
+   "description": "Company this sync run is for. Digitax Sync Job stays a Single, so this is set before each manual run and overwritten on the next.",
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company"
+  },
   {
    "fieldname": "sync_type",
    "fieldtype": "Select",

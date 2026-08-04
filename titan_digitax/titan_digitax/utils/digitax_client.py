@@ -3,7 +3,7 @@
 
 """
 Digitax API Client for pulling data FROM Digitax into ERPNext.
-Reuses authentication and base URL from Digitax Settings.
+Reuses authentication and base URL from this company's Digitax Company Settings.
 """
 
 import frappe
@@ -14,30 +14,25 @@ from frappe import _
 class DigitaxClient:
 	"""Client for interacting with Digitax API to pull data."""
 	
-	def __init__(self, company=None):
-		"""Initialize client with the credentials for a company.
-
-		company=None uses the global Digitax Settings values. Credentials come from
-		company_config so there is a single resolution path — this class used to
-		duplicate the reads, which meant strict mode could be bypassed here.
-		"""
-		from titan_digitax.titan_digitax.utils.company_config import get_digitax_company_config
+	def __init__(self, company):
+		"""Initialize client with this company's own Digitax Company Settings."""
+		from titan_digitax.titan_digitax.utils.company_config import (
+			get_digitax_company_config,
+			get_digitax_settings,
+		)
 
 		self.company = company
-		self.settings = frappe.get_single("Digitax Settings")
+		self.settings = get_digitax_settings(company)
 
-		cfg = get_digitax_company_config(company, self.settings)
+		cfg = get_digitax_company_config(company)
 
 		if not cfg.base_url:
-			frappe.throw(_("Digitax Base URL is not configured in Digitax Settings"))
+			frappe.throw(_("Digitax Base URL is not configured for {0}").format(company))
 		if not cfg.api_key:
-			frappe.throw(
-				_("Digitax API Key is not configured for {0}").format(company or _("Digitax Settings"))
-			)
+			frappe.throw(_("Digitax API Key is not configured for {0}").format(company))
 
 		self.base_url = cfg.base_url
 		self.api_key = cfg.api_key
-		self.credential_source = cfg.source
 
 		self.timeout = int(self.settings.get("api_request_timeout") or 30)
 	

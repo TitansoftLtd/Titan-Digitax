@@ -3,8 +3,8 @@
 
 frappe.ui.form.on("Digitax Sync Job", {
 	refresh: function(frm) {
-		// Only show Execute button if sync type is selected
-		if (frm.doc.sync_type) {
+		// Only show Execute button if sync type and company are selected
+		if (frm.doc.sync_type && frm.doc.company) {
 			// Always show execute button (allows re-running)
 			frm.add_custom_button(__("Execute Sync"), function() {
 				execute_sync(frm);
@@ -30,6 +30,11 @@ frappe.ui.form.on("Digitax Sync Job", {
 	sync_type: function(frm) {
 		// Trigger refresh when sync type changes to show/hide button
 		frm.trigger("refresh");
+	},
+
+	company: function(frm) {
+		// Trigger refresh when company changes to show/hide button
+		frm.trigger("refresh");
 	}
 });
 
@@ -42,19 +47,30 @@ function execute_sync(frm) {
 		});
 		return;
 	}
-	
-	// Store the selected sync type before clearing
+
+	if (!frm.doc.company) {
+		frappe.msgprint({
+			title: __("Company Required"),
+			message: __("Please select a Company before executing."),
+			indicator: "red"
+		});
+		return;
+	}
+
+	// Store the selected sync type/company before clearing
 	const selected_sync_type = frm.doc.sync_type;
-	
+	const selected_company = frm.doc.company;
+
 	// Confirm execution
 	frappe.confirm(
-		__("Are you sure you want to sync {0} from Digitax?", [selected_sync_type]),
+		__("Are you sure you want to sync {0} from Digitax for {1}?", [selected_sync_type, selected_company]),
 		function() {
 			// User confirmed
 			frappe.call({
 				method: "titan_digitax.titan_digitax.doctype.digitax_sync_job.digitax_sync_job.execute_digitax_sync",
 				args: {
-					sync_type: selected_sync_type
+					sync_type: selected_sync_type,
+					company: selected_company
 				},
 				freeze: true,
 				freeze_message: __("Starting sync job..."),

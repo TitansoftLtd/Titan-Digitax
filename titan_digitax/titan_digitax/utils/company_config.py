@@ -5,9 +5,11 @@ Call is_digitax_enabled_for_company() anywhere you need to decide whether to
 send a Sales Invoice to Digitax.  Do NOT use Company.custom_enable_company
 for this decision – that field is shared with Sage, MIS, and bulk banking.
 
-Credentials resolve per company via get_digitax_company_config(). Each company
-files under its own KRA account, so sending with another company's key is a
-tax-compliance incident rather than a bug — see strict mode below.
+Every DigiTax setting — credentials, timeouts, item defaults, invoice status
+codes — lives on this company's own Digitax Company Settings row. There is no
+shared/global tier: sending with another company's key would file this
+company's invoices into another school's KRA account, so nothing here ever
+falls back to a different company's values.
 """
 
 import frappe
@@ -17,72 +19,48 @@ from frappe.utils.password import get_decrypted_password
 COMPANY_DOCTYPE = "Digitax Company Settings"
 
 
-def _load_settings(digitax_settings=None):
-    return digitax_settings or frappe.get_single("Digitax Settings")
-
-
-def get_enabled_digitax_companies(digitax_settings=None):
+def get_enabled_digitax_companies():
     """Return company names enabled for DigiTax, per Digitax Company Settings."""
     if not frappe.db.table_exists(COMPANY_DOCTYPE):
         return []
     return sorted(frappe.get_all(COMPANY_DOCTYPE, filters={"enabled": 1}, pluck="company"))
 
 
-def is_digitax_enabled_for_company(company, digitax_settings=None):
+def is_digitax_enabled_for_company(company):
     """Return True only if the company is enabled for DigiTax."""
     if not company:
         return False
-    return company in set(get_enabled_digitax_companies(digitax_settings))
+    return company in set(get_enabled_digitax_companies())
 
 
-def get_digitax_company_config(company=None, digitax_settings=None) -> frappe._dict:
-    """Resolve base_url and api_key for a company.
+def get_digitax_settings(company):
+    """Return this company's Digitax Company Settings doc. Throws if none exists."""
+    if not company:
+        frappe.throw(_("A company is required to resolve DigiTax settings."))
+    if not frappe.db.exists(COMPANY_DOCTYPE, company):
+        frappe.throw(
+            _("No Digitax Company Settings exist for {0}.").format(frappe.bold(company)),
+            title=_("DigiTax Not Configured"),
+        )
+    return frappe.get_cached_doc(COMPANY_DOCTYPE, company)
 
-    ``base_url`` may safely fall back to the global value: every company talks to the
-    same DigiTax host. ``api_key`` identifies the KRA account and must not fall back
-    once strict mode is on — a mis-configured company would otherwise file its invoices
-    into another school's account, which is not reversible from ERPNext.
 
-    Returns base_url, api_key, source ("company" | "global") and fingerprint.
+def get_digitax_company_config(company) -> frappe._dict:
+    """Resolve base_url and api_key for a company, with no fallback tier.
+
+    Returns base_url, api_key, and fingerprint straight off the company's own row.
     """
-    s = _load_settings(digitax_settings)
-    cfg = frappe._dict(base_url=None, api_key=None, source="global", fingerprint=None, enabled=False)
+    row = get_digitax_settings(company)
 
-    row = None
-    if company and frappe.db.exists(COMPANY_DOCTYPE, company):
-        row = frappe.get_cached_doc(COMPANY_DOCTYPE, company)
+    api_key = get_decrypted_password(COMPANY_DOCTYPE, company, "api_key", raise_exception=False)
+    base_url = (row.base_url or "").strip().rstrip("/") or None
 
-    if row:
-        cfg.enabled = bool(row.enabled)
-        cfg.base_url = (row.base_url or "").strip() or None
-        cfg.api_key = get_decrypted_password(
-            COMPANY_DOCTYPE, company, "api_key", raise_exception=False
-        )
-        if cfg.api_key:
-            cfg.source = "company"
-            cfg.fingerprint = row.api_key_fingerprint
-
-    if not cfg.base_url:
-        cfg.base_url = (s.get("base_url") or "").strip() or None
-
-    if not cfg.api_key:
-        if s.get("strict_per_company_credentials"):
-            frappe.throw(
-                _(
-                    "No DigiTax API Key is configured for {0}. Strict Per-Company Credentials "
-                    "is on, so the global key will not be used — a shared key would file this "
-                    "company's invoices under another company's KRA account."
-                ).format(frappe.bold(company or _("this company"))),
-                title=_("DigiTax Credentials Missing"),
-            )
-        cfg.api_key = get_decrypted_password(
-            "Digitax Settings", "Digitax Settings", "api_key", raise_exception=False
-        )
-
-    if cfg.base_url:
-        cfg.base_url = cfg.base_url.rstrip("/")
-
-    return cfg
+    return frappe._dict(
+        base_url=base_url,
+        api_key=api_key,
+        fingerprint=row.api_key_fingerprint,
+        enabled=bool(row.enabled),
+    )
 
 
 def get_digitax_callback_token(company=None):
@@ -113,10 +91,4 @@ def get_company_digitax_status(company):
     if not company:
         return {"eligible": False}
 
-    settings = _load_settings()
-
-    if not settings.get("enable"):
-        return {"eligible": False}
-
-    eligible = is_digitax_enabled_for_company(company, settings)
-    return {"eligible": eligible}
+    return {"eligible": is_digitax_enabled_for_company(company)}
