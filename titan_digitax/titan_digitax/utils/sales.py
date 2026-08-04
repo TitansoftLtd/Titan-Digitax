@@ -76,8 +76,25 @@ def send_sales_invoice_to_digitax(docname):
     submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
     cancelled_status = digitax_settings.get("cancelled_invoice_status_code") or "04"
     
+    # Persist the trader invoice number BEFORE sending. DigiTax echoes this value back
+    # on the async callback, which resolves the invoice by
+    # {"custom_trader_invoice_number": ...} first. The field used to be read in four
+    # places and never written, so resolution fell through to matching the docname —
+    # and since "/" is rewritten to "_" here, any invoice whose name contains a slash
+    # could never be matched and silently lost every callback.
+    trader_invoice_number = _get_trader_invoice_base(doc)
+    if doc.custom_trader_invoice_number != trader_invoice_number:
+        frappe.db.set_value(
+            "Sales Invoice",
+            doc.name,
+            "custom_trader_invoice_number",
+            trader_invoice_number,
+            update_modified=False,
+        )
+        doc.custom_trader_invoice_number = trader_invoice_number
+
     payload = {
-        "trader_invoice_number": str(doc.custom_trader_invoice_number or (doc.name.replace("/", "_") if doc.name else "")),
+        "trader_invoice_number": trader_invoice_number,
         "items": [],
         "invoice_status_code": submitted_status if doc.docstatus == 1 else cancelled_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(),
