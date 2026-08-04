@@ -9,3 +9,4 @@ titan_digitax.patches.v1_0.seed_digitax_company_settings
 titan_digitax.patches.v1_0.retire_digitax_company_configuration
 titan_digitax.patches.v1_0.backfill_item_digitax_registrations
 titan_digitax.patches.v1_0.retire_digitax_settings
+titan_digitax.patches.v1_0.force_resync_titan_digitax_sidebar
