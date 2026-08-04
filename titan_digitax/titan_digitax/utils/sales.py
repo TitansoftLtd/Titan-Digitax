@@ -97,7 +97,7 @@ def send_sales_invoice_to_digitax(docname):
         "trader_invoice_number": trader_invoice_number,
         "items": [],
         "invoice_status_code": submitted_status if doc.docstatus == 1 else cancelled_status,
-        "callback_url": get_digitax_callback_url_for_sales_with_items(),
+        "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
     }
 
     customer_pin = resolve_digitax_customer_pin(doc)
@@ -141,7 +141,9 @@ def send_sales_invoice_to_digitax(docname):
     payload["items"] = built["items"]
     logger.info(f"Items added to payload ({len(payload['items'])} line(s)): {payload['items']}")
 
-    response_data, status_code = _post_to_digitax(endpoint, payload, digitax_settings, logger)
+    response_data, status_code = _post_to_digitax(
+        endpoint, payload, digitax_settings, logger, company=doc.company
+    )
 
     if status_code == 0:
         error_msg = response_data.get("message", "Connection error sending to Digitax")
@@ -276,7 +278,7 @@ def job_retry_sending_sales_invoices():
         timeout=job_timeout,
     )
 
-def fetch_sale_details_from_digitax(sale_id):
+def fetch_sale_details_from_digitax(sale_id, company=None):
     """
     Fetch full sale/credit note details from Digitax API using sale_id.
     Note: The same endpoint is used for both invoices and credit notes.
@@ -290,7 +292,7 @@ def fetch_sale_details_from_digitax(sale_id):
     logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
     
     try:
-        digitax_base_url, digitax_api_key = get_digitax_credentials()
+        digitax_base_url, digitax_api_key = get_digitax_credentials(company)
         
         if not digitax_base_url or not digitax_api_key:
             logger.error("Digitax credentials not configured")
@@ -367,7 +369,7 @@ def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger):
     
     if existing_sale_id:
         logger.info(f"Fetching full sale details for existing sale_id: {existing_sale_id}")
-        sale_details = fetch_sale_details_from_digitax(existing_sale_id)
+        sale_details = fetch_sale_details_from_digitax(existing_sale_id, doc.company)
         
         if sale_details:
             # Update all Digitax fields with fetched data (only if changed)
@@ -532,8 +534,8 @@ def _get_api_timeout(digitax_settings):
         return 30
 
 
-def _get_digitax_headers():
-    digitax_base_url, digitax_api_key = get_digitax_credentials()
+def _get_digitax_headers(company=None):
+    digitax_base_url, digitax_api_key = get_digitax_credentials(company)
     return digitax_base_url, {
         "accept": "application/json",
         "X-API-Key": digitax_api_key,
@@ -574,7 +576,7 @@ def _get_digitax_correction_date():
     return datetime.now(timezone.utc).date().isoformat()
 
 
-def _post_to_digitax(endpoint, payload, digitax_settings, logger=None):
+def _post_to_digitax(endpoint, payload, digitax_settings, logger=None, company=None):
     """
     Shared low-level HTTP POST to Digitax.
 
@@ -582,7 +584,7 @@ def _post_to_digitax(endpoint, payload, digitax_settings, logger=None):
     status_code == 0 signals a network/connection failure; all other values
     are real HTTP status codes from the Digitax server.
     """
-    digitax_base_url, headers = _get_digitax_headers()
+    digitax_base_url, headers = _get_digitax_headers(company)
     if not digitax_base_url:
         error = {"error": "configuration", "message": "Digitax Base URL is not configured."}
         if logger:
@@ -843,7 +845,7 @@ def _build_virtual_reversal_payload(doc, digitax_settings, state):
         "trader_invoice_number": state["next_reversal_trader_invoice_number"],
         "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=False)],
         "invoice_status_code": submitted_status,
-        "callback_url": get_digitax_callback_url_for_sales_with_items(),
+        "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "return_date": _get_digitax_correction_date(),
         "sale_id": state["active_sale_id"],
     }
@@ -862,7 +864,7 @@ def _build_virtual_sale_payload(doc, digitax_settings, state):
         "trader_invoice_number": state["next_sale_trader_invoice_number"],
         "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=True)],
         "invoice_status_code": submitted_status,
-        "callback_url": get_digitax_callback_url_for_sales_with_items(),
+        "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "sale_date": _get_digitax_correction_date(),
         "receipt_type_code": digitax_settings.get("default_receipt_type_code") or "S",
         "payment_type_code": digitax_settings.get("default_payment_type_code") or "01",
@@ -876,8 +878,10 @@ def _build_virtual_sale_payload(doc, digitax_settings, state):
     return payload
 
 
-def _post_virtual_amendment(url, payload, digitax_settings, logger):
-    response_data, status_code = _post_to_digitax(url, payload, digitax_settings, logger)
+def _post_virtual_amendment(url, payload, digitax_settings, logger, company=None):
+    response_data, status_code = _post_to_digitax(
+        url, payload, digitax_settings, logger, company=company
+    )
 
     if status_code == 0:
         logger.error(f"Digitax virtual amendment network failure: {response_data}")
@@ -886,7 +890,7 @@ def _post_virtual_amendment(url, payload, digitax_settings, logger):
     if status_code == 409 and "trader_invoice_number has already been used" in (response_data.get("message", "").lower()):
         existing_sale_id = (response_data.get("metadata") or {}).get("existing_sale_id", "")
         if existing_sale_id:
-            sale_details = fetch_sale_details_from_digitax(existing_sale_id)
+            sale_details = fetch_sale_details_from_digitax(existing_sale_id, company)
             if sale_details:
                 sale_details["already_exists"] = True
                 return sale_details, 200
@@ -1075,7 +1079,9 @@ def send_virtual_digitax_reversal(invoice_name, correction_reason=None):
 
     payload = _build_virtual_reversal_payload(doc, digitax_settings, state)
     preview = _build_virtual_reversal_preview(doc, state, correction_reason)
-    response_data, status_code = _post_virtual_amendment("credit-notes-with-barcode", payload, digitax_settings, logger)
+    response_data, status_code = _post_virtual_amendment(
+        "credit-notes-with-barcode", payload, digitax_settings, logger, company=doc.company
+    )
     success = 200 <= status_code < 300
 
     row_data = {
@@ -1121,7 +1127,9 @@ def send_virtual_digitax_sale(invoice_name, correction_reason=None):
 
     payload = _build_virtual_sale_payload(doc, digitax_settings, state)
     preview = _build_virtual_sale_preview(doc, state, correction_reason)
-    response_data, status_code = _post_virtual_amendment("sales-with-items", payload, digitax_settings, logger)
+    response_data, status_code = _post_virtual_amendment(
+        "sales-with-items", payload, digitax_settings, logger, company=doc.company
+    )
     success = 200 <= status_code < 300
     customer_pin = resolve_digitax_customer_pin(doc)
 
