@@ -14,26 +14,31 @@ from frappe import _
 class DigitaxClient:
 	"""Client for interacting with Digitax API to pull data."""
 	
-	def __init__(self):
-		"""Initialize client with settings from Digitax Settings."""
-		from frappe.utils.password import get_decrypted_password
-		
+	def __init__(self, company=None):
+		"""Initialize client with the credentials for a company.
+
+		company=None uses the global Digitax Settings values. Credentials come from
+		company_config so there is a single resolution path — this class used to
+		duplicate the reads, which meant strict mode could be bypassed here.
+		"""
+		from titan_digitax.titan_digitax.utils.company_config import get_digitax_company_config
+
+		self.company = company
 		self.settings = frappe.get_single("Digitax Settings")
-		
-		# Validate required settings
-		if not self.settings.base_url:
+
+		cfg = get_digitax_company_config(company, self.settings)
+
+		if not cfg.base_url:
 			frappe.throw(_("Digitax Base URL is not configured in Digitax Settings"))
-		
-		self.base_url = self.settings.base_url.rstrip("/")
-		
-		# Get decrypted API key (same method as sales.py)
-		self.api_key = get_decrypted_password(
-			"Digitax Settings", "Digitax Settings", "api_key"
-		)
-		
-		if not self.api_key:
-			frappe.throw(_("Digitax API Key is not configured in Digitax Settings"))
-		
+		if not cfg.api_key:
+			frappe.throw(
+				_("Digitax API Key is not configured for {0}").format(company or _("Digitax Settings"))
+			)
+
+		self.base_url = cfg.base_url
+		self.api_key = cfg.api_key
+		self.credential_source = cfg.source
+
 		self.timeout = int(self.settings.get("api_request_timeout") or 30)
 	
 	def _get_headers(self):

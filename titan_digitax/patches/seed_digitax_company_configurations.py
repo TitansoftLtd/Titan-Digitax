@@ -17,6 +17,11 @@ def execute():
         # Braeburn app is not installed; nothing to backfill.
         return
 
+    if not frappe.get_meta("Digitax Settings").has_field("company_configurations"):
+        # Retired in favour of the per-company Digitax Company Settings doctype
+        # (titan_digitax.patches.v1_0.retire_digitax_company_configuration).
+        return
+
     settings = frappe.get_single("Digitax Settings")
     target_country = settings.target_country or "Kenya"
 

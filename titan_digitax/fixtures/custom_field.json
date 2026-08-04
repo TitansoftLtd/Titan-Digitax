@@ -1425,6 +1425,19 @@
   "width": null
  },
  {
+  "description": "One row per company: that company's own DigiTax catalogue registration for this item.",
+  "docstatus": 0,
+  "doctype": "Custom Field",
+  "dt": "Item",
+  "fieldname": "custom_digitax_registrations",
+  "fieldtype": "Table",
+  "insert_after": "custom_digitax_last_sync",
+  "label": "Digitax Registrations (per Company)",
+  "module": "Titan Digitax",
+  "name": "Item-custom_digitax_registrations",
+  "options": "Item Digitax Registration"
+ },
+ {
   "allow_in_quick_entry": 0,
   "allow_on_submit": 0,
   "bold": 0,

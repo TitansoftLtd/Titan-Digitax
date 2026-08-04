@@ -1,0 +1,95 @@
+{
+ "actions": [],
+ "creation": "2026-08-04 13:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "digitax_item_name",
+  "digitax_id",
+  "column_break_reg",
+  "digitax_etims_item_code",
+  "synced",
+  "last_sync",
+  "digitax_status",
+  "digitax_active"
+ ],
+ "fields": [
+  {
+   "columns": 2,
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "columns": 3,
+   "description": "Name sent to this company's DigiTax catalogue. Falls back to Item.custom_digitax_item_name when blank.",
+   "fieldname": "digitax_item_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Digitax Item Name"
+  },
+  {
+   "columns": 2,
+   "description": "Catalogue id issued by this company's DigiTax account.",
+   "fieldname": "digitax_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Digitax ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_reg",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "digitax_etims_item_code",
+   "fieldtype": "Data",
+   "label": "eTIMS Item Code",
+   "read_only": 1
+  },
+  {
+   "columns": 1,
+   "default": "0",
+   "fieldname": "synced",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Synced",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_sync",
+   "fieldtype": "Datetime",
+   "label": "Last Sync",
+   "read_only": 1
+  },
+  {
+   "fieldname": "digitax_status",
+   "fieldtype": "Data",
+   "label": "Digitax Status",
+   "read_only": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "digitax_active",
+   "fieldtype": "Check",
+   "label": "Active in Digitax"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-08-04 13:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Titan Digitax",
+ "name": "Item Digitax Registration",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

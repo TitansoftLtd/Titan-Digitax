@@ -19,8 +19,8 @@
   "require_manual_item_sync",
   "column_break_d14",
   "auto_sync_items_to_digitax",
+  "strict_per_company_credentials",
   "eligible_companies_section",
-  "company_configurations",
   "virtual_amendments_section",
   "virtual_amendment_role",
   "default_item_settings_section",
@@ -105,10 +105,10 @@
    "label": "Background Job Timeout (seconds)"
   },
   {
+   "description": "D14 gates for DigiTax send. St. Austin defaults: require Digitax Item Name ON, require manual sync ON, auto-sync OFF.",
    "fieldname": "item_sync_overrides_section",
    "fieldtype": "Section Break",
-   "label": "Item Sync Overrides",
-   "description": "D14 gates for DigiTax send. St. Austin defaults: require Digitax Item Name ON, require manual sync ON, auto-sync OFF."
+   "label": "Item Sync Overrides"
   },
   {
    "default": "1",
@@ -136,16 +136,17 @@
    "label": "Auto Sync Items to Digitax"
   },
   {
-   "fieldname": "eligible_companies_section",
-   "fieldtype": "Section Break",
-   "label": "Eligible Companies",
-   "description": "Only companies listed here with Enabled checked will have their invoices sent to Digitax."
+   "default": "0",
+   "description": "When ON, a company must have its own API Key in Digitax Company Settings. Sends are blocked rather than falling back to the global key \u2014 a fallback would file one company's invoices into another company's KRA account.",
+   "fieldname": "strict_per_company_credentials",
+   "fieldtype": "Check",
+   "label": "Strict Per-Company Credentials"
   },
   {
-   "fieldname": "company_configurations",
-   "fieldtype": "Table",
-   "label": "Company Configurations",
-   "options": "Digitax Company Configuration"
+   "description": "Only companies listed here with Enabled checked will have their invoices sent to Digitax.",
+   "fieldname": "eligible_companies_section",
+   "fieldtype": "Section Break",
+   "label": "Eligible Companies"
   },
   {
    "fieldname": "virtual_amendments_section",
@@ -290,7 +291,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-07-30 10:00:00.000000",
+ "modified": "2026-08-04 14:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Settings",

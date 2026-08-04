@@ -3,6 +3,8 @@
 # For license information, please see license.txt
 
 import frappe
+
+from titan_digitax.titan_digitax.utils import item_registry
 from frappe.utils import now_datetime
 
 from titan_digitax.titan_digitax.utils.actionable import create_actionable_item
@@ -107,50 +109,65 @@ def create_and_sync_item_from_mis(item_name, price):
 		}
 
 
-def _reuse_digitax_id_by_display_name(item, display_name):
-	"""If another Item already has this DigiTax display name synced, copy its ID."""
-	if not display_name:
+def _reuse_digitax_id_by_display_name(item, display_name, company):
+	"""Reuse a DigiTax id already issued for this display name **within this company**.
+
+	The company scope is the whole point. Without it, one company's catalogue id gets
+	copied onto another company's item and every later invoice for that item is filed
+	under the wrong KRA registration — silently, because the send still succeeds.
+	"""
+	if not display_name or not company:
 		return None
 
-	rows = frappe.db.sql(
-		"""
-		select name, custom_digitax_id, custom_digitax_etims_item_code
-		from `tabItem`
-		where name != %s
-		  and ifnull(custom_digitax_id, '') != ''
-		  and (
-			nullif(trim(custom_digitax_item_name), '') = %s
-			or (ifnull(trim(custom_digitax_item_name), '') = '' and item_name = %s)
-		  )
-		limit 1
-		""",
-		(item.name, display_name, display_name),
-		as_dict=True,
+	src = item_registry.find_item_with_digitax_id(company, display_name)
+	if not src:
+		return None
+
+	item_registry.upsert_registration(
+		item.name,
+		company,
+		digitax_id=src.digitax_id,
+		digitax_etims_item_code=src.digitax_etims_item_code,
+		synced=1,
+		last_sync=now_datetime(),
 	)
-	if not rows:
-		return None
 
-	src = rows[0]
-	item.custom_digitax_id = src.custom_digitax_id
-	if src.custom_digitax_etims_item_code:
-		item.custom_digitax_etims_item_code = src.custom_digitax_etims_item_code
-	item.custom_digitax_synced = 1
-	item.custom_digitax_last_sync = now_datetime()
-	item.save(ignore_permissions=True)
+	# Legacy mirror, kept during the transition so a rollback stays possible.
+	if not (item.get("custom_digitax_id") or "").strip():
+		frappe.db.set_value(
+			"Item",
+			item.name,
+			{
+				"custom_digitax_id": src.digitax_id,
+				"custom_digitax_etims_item_code": src.digitax_etims_item_code,
+				"custom_digitax_synced": 1,
+				"custom_digitax_last_sync": now_datetime(),
+			},
+			update_modified=False,
+		)
 	frappe.db.commit()
-	return src.custom_digitax_id
+	return src.digitax_id
 
 
 @frappe.whitelist()
-def sync_item_to_digitax(item_name):
+def sync_item_to_digitax(item_name, company=None):
 	"""
-	Sync a single Item to Digitax.
+	Sync a single Item to Digitax for one company.
 	Called from "Sync to Digitax" button on Item form.
 	"""
 	try:
 		item = frappe.get_doc("Item", item_name)
 
-		if item.custom_digitax_id:
+		# "Already synced" has to be judged per company: each company registers the
+		# item in its own catalogue and gets its own id back.
+		if company:
+			existing = item_registry.get_registration(item.name, company)
+			if existing and (existing.digitax_id or "").strip():
+				return {
+					"status": "error",
+					"message": f"This item is already synced to Digitax for {company}",
+				}
+		elif item.custom_digitax_id:
 			return {
 				"status": "error",
 				"message": "This item is already synced to Digitax",
@@ -160,7 +177,7 @@ def sync_item_to_digitax(item_name):
 		if not settings.enable:
 			frappe.throw("Digitax integration is not enabled. Please enable it in Digitax Settings.")
 
-		display_name = get_digitax_display_name(item.name, settings)
+		display_name = item_registry.get_display_name(item.name, company, settings)
 		require_name = bool(settings.get("require_digitax_item_name", 1))
 
 		missing_fields = []
@@ -209,7 +226,7 @@ def sync_item_to_digitax(item_name):
 				f"An actionable item has been created for follow-up."
 			)
 
-		reused = _reuse_digitax_id_by_display_name(item, display_name)
+		reused = _reuse_digitax_id_by_display_name(item, display_name, company)
 		if reused:
 			return {
 				"status": "success",
@@ -232,7 +249,7 @@ def sync_item_to_digitax(item_name):
 			"default_unit_price": float(price_list_rate),
 		}
 
-		client = DigitaxClient()
+		client = DigitaxClient(company)
 		response = client.create_item(payload)
 
 		http_status = response.get("http_status_code")
@@ -242,10 +259,25 @@ def sync_item_to_digitax(item_name):
 				f"Expected 201 (Created)."
 			)
 
-		item.custom_digitax_id = response.get("id")
-		item.custom_digitax_etims_item_code = response.get("etims_item_code")
-		item.custom_digitax_synced = 1
-		item.custom_digitax_last_sync = now_datetime()
+		# Record the id against THIS company; the legacy Item fields are still
+		# mirrored during the transition so a rollback stays possible.
+		if company:
+			item_registry.upsert_registration(
+				item.name,
+				company,
+				digitax_item_name=display_name,
+				digitax_id=response.get("id"),
+				digitax_etims_item_code=response.get("etims_item_code"),
+				synced=1,
+				last_sync=now_datetime(),
+			)
+			item.reload()
+
+		if not (item.get("custom_digitax_id") or "").strip():
+			item.custom_digitax_id = response.get("id")
+			item.custom_digitax_etims_item_code = response.get("etims_item_code")
+			item.custom_digitax_synced = 1
+			item.custom_digitax_last_sync = now_datetime()
 		if require_name and not (item.get("custom_digitax_item_name") or "").strip():
 			item.custom_digitax_item_name = display_name
 		item.save(ignore_permissions=True)

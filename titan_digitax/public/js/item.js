@@ -13,25 +13,40 @@ frappe.ui.form.on('Item', {
 });
 
 function sync_item_to_digitax(frm) {
-	// Check if already synced
-	if (frm.doc.custom_digitax_id) {
-		frappe.msgprint({
-			title: __('Already Synced'),
-			indicator: 'blue',
-			message: __('This item is already synced to Digitax')
-		});
-		return;
-	}
-	
-	// Confirm action
-	frappe.confirm(
-		__('Are you sure you want to sync this item to Digitax?'),
-		function() {
-			// User confirmed - proceed with sync
+	// Registration is per company: each company registers the item in its own DigiTax
+	// catalogue and gets its own id back, so ask which company this sync is for.
+	frappe.prompt(
+		[
+			{
+				label: __('Company'),
+				fieldname: 'company',
+				fieldtype: 'Link',
+				options: 'Company',
+				reqd: 1,
+				get_query: () => ({ filters: { is_group: 0 } }),
+			},
+		],
+		function (values) {
+			const already = (frm.doc.custom_digitax_registrations || []).find(
+				(r) => r.company === values.company && r.digitax_id
+			);
+			if (already) {
+				frappe.msgprint({
+					title: __('Already Synced'),
+					indicator: 'blue',
+					message: __('This item is already synced to Digitax for {0} (ID {1})', [
+						values.company,
+						already.digitax_id,
+					]),
+				});
+				return;
+			}
+
 			frappe.call({
 				method: 'titan_digitax.titan_digitax.utils.items.sync_item_to_digitax',
 				args: {
-					item_name: frm.doc.name
+					item_name: frm.doc.name,
+					company: values.company
 				},
 				freeze: true,
 				freeze_message: __('Syncing to Digitax...'),

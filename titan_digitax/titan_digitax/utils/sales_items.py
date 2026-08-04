@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import frappe
 
+from titan_digitax.titan_digitax.utils import item_registry
+
 from titan_digitax.titan_digitax.utils.actionable import create_actionable_item
 
 
@@ -110,8 +112,8 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 			rate = abs(rate or 0)
 			amount = abs(amount or 0)
 
-		display_name = get_digitax_display_name(item_code, digitax_settings)
-		digitax_id = frappe.db.get_value("Item", item_code, "custom_digitax_id")
+		display_name = item_registry.get_display_name(item_code, doc.company, digitax_settings)
+		digitax_id = item_registry.get_digitax_id(item_code, doc.company)
 
 		if require_name and not display_name:
 			gate_failures.append(
@@ -129,7 +131,7 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 
 		if require_sync and not digitax_id:
 			if auto_sync:
-				digitax_id = _try_auto_sync_item(item_code, display_name, log)
+				digitax_id = _try_auto_sync_item(item_code, display_name, log, doc.company)
 			if not digitax_id:
 				gate_failures.append(
 					{
@@ -141,7 +143,7 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 				)
 				continue
 		elif not digitax_id and auto_sync:
-			digitax_id = _try_auto_sync_item(item_code, display_name, log)
+			digitax_id = _try_auto_sync_item(item_code, display_name, log, doc.company)
 
 		# Aggregate by display name (plan §2.1 v1: qty=1, sum amounts)
 		line_amount = abs(float(amount or 0))
@@ -220,50 +222,37 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 	return {"ok": True, "items": payload_items}
 
 
-def _try_auto_sync_item(item_code, display_name, log):
-	"""Reuse DigiTax ID by display name, or create via DigitaxClient when auto_sync is on."""
-	try:
-		existing_id = frappe.db.get_value(
-			"Item",
-			{"custom_digitax_item_name": display_name, "custom_digitax_id": ["!=", ""]},
-			"custom_digitax_id",
-		)
-		if not existing_id:
-			# Also match items that used ERP name as DigiTax name
-			existing_id = frappe.db.sql(
-				"""
-				select custom_digitax_id from `tabItem`
-				where ifnull(custom_digitax_id, '') != ''
-				  and (
-					nullif(trim(custom_digitax_item_name), '') = %s
-					or (ifnull(trim(custom_digitax_item_name), '') = '' and item_name = %s)
-				  )
-				limit 1
-				""",
-				(display_name, display_name),
-			)
-			existing_id = existing_id[0][0] if existing_id else None
+def _try_auto_sync_item(item_code, display_name, log, company=None):
+	"""Reuse this company's DigiTax ID for the display name, or create one via DigitaxClient.
 
-		if existing_id:
-			frappe.db.set_value(
-				"Item",
+	Scoped to the company: the previous version matched on display name alone across
+	the whole database, so one company's catalogue id was copied onto another
+	company's item and its invoices were then filed under the wrong KRA registration.
+	"""
+	try:
+		src = item_registry.find_item_with_digitax_id(company, display_name) if company else None
+
+		if src and src.digitax_id:
+			item_registry.upsert_registration(
 				item_code,
-				{
-					"custom_digitax_id": existing_id,
-					"custom_digitax_synced": 1,
-				},
-				update_modified=False,
+				company,
+				digitax_id=src.digitax_id,
+				digitax_etims_item_code=src.digitax_etims_item_code,
+				synced=1,
 			)
-			log.info(f"Reused DigiTax ID {existing_id} for {item_code} via display name '{display_name}'")
-			return existing_id
+			log.info(
+				f"Reused DigiTax ID {src.digitax_id} for {item_code} via display name "
+				f"'{display_name}' within {company}"
+			)
+			return src.digitax_id
 
 		from titan_digitax.titan_digitax.utils.items import sync_item_to_digitax
 
-		result = sync_item_to_digitax(item_code)
+		result = sync_item_to_digitax(item_code, company)
 		if result and result.get("status") == "success":
-			return result.get("digitax_id") or frappe.db.get_value("Item", item_code, "custom_digitax_id")
+			return result.get("digitax_id") or item_registry.get_digitax_id(item_code, company)
 	except Exception as e:
-		log.warning(f"Auto-sync failed for {item_code}: {e}")
+		log.warning(f"Auto-sync failed for {item_code} ({company}): {e}")
 	return None
 
 
