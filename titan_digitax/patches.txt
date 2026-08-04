@@ -6,4 +6,5 @@
 # Patches added in this section will be executed after doctypes are migrated
 titan_digitax.patches.seed_digitax_company_configurations
 titan_digitax.patches.v1_0.seed_digitax_company_settings
+titan_digitax.patches.v1_0.retire_digitax_company_configuration
 titan_digitax.patches.v1_0.backfill_item_digitax_registrations

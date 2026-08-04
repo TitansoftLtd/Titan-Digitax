@@ -22,22 +22,10 @@ def _load_settings(digitax_settings=None):
 
 
 def get_enabled_digitax_companies(digitax_settings=None):
-    """Return company names enabled for DigiTax.
-
-    Union of the per-company doctype and the legacy child table on Digitax Settings,
-    so the list never empties mid-deploy while sites are still being migrated.
-    """
-    names = set()
-
-    if frappe.db.table_exists(COMPANY_DOCTYPE):
-        names.update(frappe.get_all(COMPANY_DOCTYPE, filters={"enabled": 1}, pluck="company"))
-
-    s = _load_settings(digitax_settings)
-    names.update(
-        row.company for row in (s.get("company_configurations") or []) if row.company and row.enabled
-    )
-
-    return sorted(names)
+    """Return company names enabled for DigiTax, per Digitax Company Settings."""
+    if not frappe.db.table_exists(COMPANY_DOCTYPE):
+        return []
+    return sorted(frappe.get_all(COMPANY_DOCTYPE, filters={"enabled": 1}, pluck="company"))
 
 
 def is_digitax_enabled_for_company(company, digitax_settings=None):
