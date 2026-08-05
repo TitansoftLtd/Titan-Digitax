@@ -52,6 +52,7 @@ fixtures = [
 doctype_js = {
     "Sales Invoice" : "public/js/sales_invoice.js",
     "Item": "public/js/item.js",
+    "Digitax Item": "public/js/digitax_item.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -151,11 +152,6 @@ jinja = {
 doc_events = {
 	"Sales Invoice": {
         "on_submit": "titan_digitax.titan_digitax.utils.sales_invoice.on_submit"
-    },
-    # A child table cannot carry a DB composite unique, so "one registration per
-    # company" and "no two items sharing a DigiTax id within a company" are enforced here.
-    "Item": {
-        "validate": "titan_digitax.titan_digitax.utils.item_registry.validate_item_registrations"
     },
 }
 
