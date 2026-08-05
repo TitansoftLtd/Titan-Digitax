@@ -1,62 +1,24 @@
-"""
-Seed Digitax Settings → Eligible Companies from existing Company data.
+# Copyright (c) 2026, Titan and contributors
+# For license information, please see license.txt
 
-This patch is idempotent:
-- Only runs when Braeburn's custom_enable_company field exists (titan_digitax does
-  not require braeburn as a dependency).
-- Only inserts rows that are not already present.
-- Only inserts enabled leaf companies in the target country.
-- Does not modify or delete any Company fields.
-"""
+"""Retired — Digitax Settings and its company_configurations child table are gone.
 
-import frappe
+This used to seed Digitax Settings.company_configurations from
+Company.custom_enable_company. That child table was retired in favour of
+Digitax Company Configuration, which was itself retired in favour of the
+standalone Digitax Company Settings doctype (retire_digitax_company_configuration),
+and Digitax Settings itself was later deleted outright (retire_digitax_settings) —
+this patch's job has been fully superseded for two releases running.
+
+Kept as a no-op rather than deleted: a site that reaches this patch for the first
+time after Digitax Settings' controller module was deleted must not crash trying to
+import it — same failure mode fixed in seed_digitax_company_settings.py and
+create_engage_settings_from_single.py. The original version also crashed on a BRAND
+NEW site with a different exception (frappe.get_meta("Digitax Settings") raising
+DoesNotExistError, since the DocType row never existed there either) — a no-op
+sidesteps both failure modes at once.
+"""
 
 
 def execute():
-    if not frappe.db.has_column("Company", "custom_enable_company"):
-        # Braeburn app is not installed; nothing to backfill.
-        return
-
-    if not frappe.get_meta("Digitax Settings").has_field("company_configurations"):
-        # Retired in favour of the per-company Digitax Company Settings doctype
-        # (titan_digitax.patches.v1_0.retire_digitax_company_configuration).
-        return
-
-    settings = frappe.get_single("Digitax Settings")
-    target_country = settings.target_country or "Kenya"
-
-    existing_companies = {row.company for row in (settings.company_configurations or [])}
-
-    candidates = frappe.get_all(
-        "Company",
-        filters={
-            "country": target_country,
-            "custom_enable_company": 1,
-            "is_group": 0,
-        },
-        pluck="name",
-    )
-
-    added = 0
-    for company in candidates:
-        if company in existing_companies:
-            continue
-        settings.append("company_configurations", {
-            "company": company,
-            "enabled": 1,
-            "description": "Seeded by migration from custom_enable_company flag.",
-        })
-        existing_companies.add(company)
-        added += 1
-
-    if added:
-        settings.flags.ignore_validate = True
-        settings.save(ignore_permissions=True)
-        frappe.db.commit()
-        frappe.logger().info(
-            f"seed_digitax_company_configurations: added {added} company row(s) to Digitax Settings."
-        )
-    else:
-        frappe.logger().info(
-            "seed_digitax_company_configurations: no new rows needed, all eligible companies already present."
-        )
+	return
