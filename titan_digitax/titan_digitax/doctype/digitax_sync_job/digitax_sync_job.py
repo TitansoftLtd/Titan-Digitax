@@ -166,230 +166,143 @@ def sync_customers_from_digitax(company, start_time=None, end_time=None):
 	}
 
 
-def _sync_item_price_to_standard_selling(item_name, price):
+def get_or_create_digitax_item(item_data, company):
 	"""
-	Helper function to create/update Item Price for Standard Selling price list.
-	
-	Args:
-		item_name (str): Item code
-		price (float): Price to set
-	"""
-	if not price or price <= 0:
-		return
-	
-	price_list = "Standard Selling"
-	
-	# Check if Item Price already exists
-	existing_price = frappe.db.get_value(
-		"Item Price",
-		{
-			"item_code": item_name,
-			"price_list": price_list
-		},
-		["name", "price_list_rate"],
-		as_dict=True
-	)
-	
-	if existing_price:
-		# Update existing price if it changed
-		if existing_price.price_list_rate != price:
-			frappe.db.set_value(
-				"Item Price",
-				existing_price.name,
-				"price_list_rate",
-				price
-			)
-			frappe.logger().info(
-				f"Updated Standard Selling price for {item_name}: "
-				f"{existing_price.price_list_rate} → {price}"
-			)
-	else:
-		# Create new Item Price
-		try:
-			item_price = frappe.get_doc({
-				"doctype": "Item Price",
-				"item_code": item_name,
-				"price_list": price_list,
-				"price_list_rate": price,
-				"currency": "KES"
-			})
-			item_price.insert(ignore_permissions=True)
-			frappe.logger().info(
-				f"Created Standard Selling price for {item_name}: {price}"
-			)
-		except Exception as e:
-			frappe.logger().error(
-				f"Failed to create Item Price for {item_name}: {str(e)}"
-			)
+	Get or create a Digitax Item from DigiTax's own catalogue data (inbound pull-sync).
 
-
-def get_or_create_digitax_item(item_data):
-	"""
-	Get or create item from Digitax data.
-	Similar pattern to MIS get_or_create_item but with Digitax-specific fields.
-	
 	Priority:
-	1. Check by item_name first (prevents duplicate names)
-	2. Check by custom_digitax_id (secondary validation)
-	3. If both exist but don't match, flag as error for review
-	
+	1. Check by digitax_id first (this company's authoritative match).
+	2. Check by item_name for this company (docname is deterministic —
+	   "{item_name}({company_abbr})" — so this is really the same record unless the
+	   id was reassigned).
+	3. If both exist but don't match, flag as error for review.
+
 	Args:
 		item_data (dict): Item data from Digitax API
-	
+		company: The company this DigiTax account belongs to
+
 	Returns:
 		dict: Result with status (created/updated/exists) and item_name
 	"""
 	from frappe.utils import now_datetime
-	
+
 	digitax_id = item_data.get("id")
 	item_name = (item_data.get("item_name") or "").strip()
-	
+
 	if not item_name:
 		frappe.throw(f"Item name is required. Digitax ID: {digitax_id}")
-	
-	# PRIMARY CHECK: Find by item_name (prevents duplicate names)
+
+	abbr = frappe.get_cached_value("Company", company, "abbr")
+	docname_by_name = f"{item_name}({abbr})"
+
+	# PRIMARY CHECK: Find by item_name for this company (deterministic docname)
 	item_by_name = None
-	if frappe.db.exists("Item", item_name):
-		item_by_name = frappe.get_doc("Item", item_name)
-	
-	# SECONDARY CHECK: Find by Digitax ID
+	if frappe.db.exists("Digitax Item", docname_by_name):
+		item_by_name = frappe.get_doc("Digitax Item", docname_by_name)
+
+	# SECONDARY CHECK: Find by Digitax ID, scoped to this company
 	item_by_digitax_id = None
 	if digitax_id:
-		existing_name = frappe.db.get_value("Item", {"custom_digitax_id": digitax_id}, "name")
+		existing_name = frappe.db.get_value(
+			"Digitax Item", {"digitax_id": digitax_id, "company": company}, "name"
+		)
 		if existing_name:
-			item_by_digitax_id = frappe.get_doc("Item", existing_name)
-	
+			item_by_digitax_id = frappe.get_doc("Digitax Item", existing_name)
+
 	# CONFLICT DETECTION: If both exist but don't match, flag error
 	if item_by_name and item_by_digitax_id:
 		if item_by_name.name != item_by_digitax_id.name:
 			error_msg = (
-				f"DATA CONFLICT: Item name '{item_name}' exists but with different Digitax ID. "
-				f"Digitax ID '{digitax_id}' is assigned to item '{item_by_digitax_id.name}'. "
+				f"DATA CONFLICT: Digitax Item '{docname_by_name}' exists but with a different "
+				f"Digitax ID. Digitax ID '{digitax_id}' is assigned to '{item_by_digitax_id.name}'. "
 				f"Please review and resolve this conflict manually."
 			)
 			frappe.logger().error(error_msg)
 			frappe.log_error(error_msg, "Digitax Item Sync - Data Conflict")
 			frappe.throw(error_msg)
-	
-	# Use item_by_name as priority (if it exists)
+
 	existing_item = item_by_name or item_by_digitax_id
-	
+
 	# Prepare field values (excluding timestamp fields from initial comparison)
 	item_fields = {
-		# Standard ERPNext fields
 		"item_name": item_name,
-		"item_group": "Services",
-		"stock_uom": "Nos",
-		"is_stock_item": 1 if item_data.get("is_stock_item") else 0,
-		"is_sales_item": 1,  # Always enable for sales
-		"disabled": 0 if item_data.get("active") else 1,
-		
-		# Custom Digitax fields (editable codes)
-		"custom_item_class_code": item_data.get("item_class_code"),
-		"custom_tax_type_code": item_data.get("tax_type_code"),
-		
-		# Custom Digitax fields (read-only sync data)
-		"custom_digitax_id": digitax_id,
-		"custom_digitax_etims_item_code": item_data.get("etims_item_code"),
-		"custom_digitax_item_type_code": item_data.get("item_type_code"),
-		"custom_digitax_origin_nation_code": item_data.get("origin_nation_code"),
-		"custom_digitax_package_unit_code": item_data.get("package_unit_code"),
-		"custom_digitax_quantity_unit_code": item_data.get("quantity_unit_code"),
-		"custom_digitax_active": 1 if item_data.get("active") else 0,
-		"custom_digitax_status": item_data.get("status"),
-		
-		# Sync tracking (will only be updated if there are other changes)
-		"custom_digitax_synced": 1,
+		"company": company,
+		"item_class_code": item_data.get("item_class_code"),
+		"item_type_code": item_data.get("item_type_code"),
+		"tax_type_code": item_data.get("tax_type_code"),
+		"origin_nation_code": item_data.get("origin_nation_code"),
+		"package_unit_code": item_data.get("package_unit_code"),
+		"quantity_unit_code": item_data.get("quantity_unit_code"),
+		"default_unit_price": item_data.get("default_unit_price") or 0,
+		"enabled": 1 if item_data.get("active") else 0,
+		"digitax_id": digitax_id,
+		"etims_item_code": item_data.get("etims_item_code"),
+		"synced": 1,
 	}
-	
+
 	if existing_item:
-		# Check if Digitax ID matches before updating
-		current_digitax_id = existing_item.get("custom_digitax_id")
-		
-		# If item already has a Digitax ID and it doesn't match, skip this item
-		if current_digitax_id and current_digitax_id != digitax_id:
+		current_digitax_id = existing_item.get("digitax_id")
+
+		if current_digitax_id and digitax_id and current_digitax_id != digitax_id:
 			frappe.logger().warning(
-				f"SKIPPED: Item '{item_name}' has Digitax ID '{current_digitax_id}', "
+				f"SKIPPED: Digitax Item '{existing_item.name}' has Digitax ID '{current_digitax_id}', "
 				f"but incoming data has '{digitax_id}'. Not updating. "
-				f"Change Digitax ID manually in UI if needed."
+				f"Change the Digitax ID manually in UI if needed."
 			)
 			return {"status": "skipped", "item_name": existing_item.name, "reason": "digitax_id_mismatch"}
-		
-		# Digitax ID matches (or not set) - check for changes in other fields
-		# Exclude custom_digitax_id from comparison if it's already set
+
 		fields_to_update = {}
 		for field, value in item_fields.items():
-			# Skip digitax_id if already set and matches
-			if field == "custom_digitax_id" and current_digitax_id == digitax_id:
+			if field in ("item_name", "company"):
+				# set_only_once identity fields — never rewritten post-creation.
 				continue
-			
-			current_value = getattr(existing_item, field, None)
-			
-			# Normalize values for comparison (handle type mismatches)
-			# Convert None to empty string for string fields
+			if field == "digitax_id" and current_digitax_id == digitax_id:
+				continue
+
+			current_value = existing_item.get(field)
+
 			if value == "" and current_value is None:
 				continue
 			if value is None and current_value == "":
 				continue
-			# Convert boolean/int comparisons (1 vs True, 0 vs False)
 			if isinstance(value, (bool, int)) and isinstance(current_value, (bool, int)):
 				if bool(value) == bool(current_value):
 					continue
-			
-			# Check if value actually changed
+
 			if current_value != value:
 				fields_to_update[field] = value
-		
-		# Only update if there are actual changes
+
 		if fields_to_update:
-			# Apply all changed fields
 			for field, value in fields_to_update.items():
-				setattr(existing_item, field, value)
-			
-			# Update timestamp only when there are actual changes
-			existing_item.custom_digitax_last_sync = now_datetime()
-			
-			existing_item.save(ignore_permissions=True)
+				existing_item.set(field, value)
+
+			existing_item.last_sync = now_datetime()
+			existing_item.flags.ignore_permissions = True
+			existing_item.save()
 			frappe.logger().info(
-				f"Updated Digitax item: {existing_item.name} "
+				f"Updated Digitax Item: {existing_item.name} "
 				f"(changed fields: {', '.join(fields_to_update.keys())})"
 			)
-			
-			# Sync price to Item Price if available
-			default_unit_price = item_data.get("default_unit_price")
-			if default_unit_price:
-				_sync_item_price_to_standard_selling(existing_item.name, default_unit_price)
-			
 			return {"status": "updated", "item_name": existing_item.name}
 		else:
-			# No changes detected - don't save
-			frappe.logger().debug(f"No changes for item: {existing_item.name}")
+			frappe.logger().debug(f"No changes for Digitax Item: {existing_item.name}")
 			return {"status": "exists", "item_name": existing_item.name}
-	
+
 	else:
-		# Create new item
 		try:
-			# Add timestamp for new items
 			new_item = frappe.get_doc({
-				"doctype": "Item",
-				"item_code": item_name,
+				"doctype": "Digitax Item",
 				**item_fields,
-				"custom_digitax_last_sync": now_datetime()
+				"last_sync": now_datetime(),
 			})
-			new_item.insert(ignore_permissions=True)
-			frappe.logger().info(f"Created Digitax item: {new_item.name}")
-			
-			# Sync price to Item Price if available
-			default_unit_price = item_data.get("default_unit_price")
-			if default_unit_price:
-				_sync_item_price_to_standard_selling(new_item.name, default_unit_price)
-			
+			new_item.flags.ignore_permissions = True
+			new_item.insert()
+			frappe.logger().info(f"Created Digitax Item: {new_item.name}")
 			return {"status": "created", "item_name": new_item.name}
-			
+
 		except frappe.DuplicateEntryError:
-			# Item was created by another process - just return the name
-			frappe.logger().info(f"Item {item_name} already exists (created by concurrent process)")
-			return {"status": "exists", "item_name": item_name}
+			frappe.logger().info(f"Digitax Item {docname_by_name} already exists (created concurrently)")
+			return {"status": "exists", "item_name": docname_by_name}
 
 
 def sync_items_from_digitax(company, start_time=None, end_time=None):
@@ -449,7 +362,7 @@ def sync_items_from_digitax(company, start_time=None, end_time=None):
 				continue
 			
 			# Use helper function to create/update item
-			result = get_or_create_digitax_item(item_data)
+			result = get_or_create_digitax_item(item_data, company)
 			
 			if result["status"] == "created":
 				created += 1

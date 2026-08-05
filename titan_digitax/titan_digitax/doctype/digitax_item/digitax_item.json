@@ -1,0 +1,181 @@
+{
+ "actions": [],
+ "creation": "2026-08-05 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "item_name",
+  "company",
+  "column_break_identity",
+  "enabled",
+  "synced",
+  "catalogue_tab",
+  "item_class_code",
+  "item_type_code",
+  "tax_type_code",
+  "column_break_catalogue",
+  "origin_nation_code",
+  "package_unit_code",
+  "quantity_unit_code",
+  "pricing_section",
+  "default_unit_price",
+  "sync_status_tab",
+  "digitax_id",
+  "etims_item_code",
+  "column_break_sync",
+  "last_sync"
+ ],
+ "fields": [
+  {
+   "description": "Literal string sent to DigiTax as this item's catalogue name for this company. Not unique across companies — each company may have its own row with the same Item Name.",
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Item Name",
+   "reqd": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "column_break_identity",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "1",
+   "description": "Item-level on/off. Usable/syncable only when this AND this company's Digitax Company Settings.enabled are both on.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "0",
+   "fieldname": "synced",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Synced",
+   "read_only": 1
+  },
+  {
+   "fieldname": "catalogue_tab",
+   "fieldtype": "Tab Break",
+   "label": "Catalogue Attributes"
+  },
+  {
+   "fieldname": "item_class_code",
+   "fieldtype": "Data",
+   "label": "Item Class Code",
+   "reqd": 1
+  },
+  {
+   "fieldname": "item_type_code",
+   "fieldtype": "Data",
+   "label": "Item Type Code",
+   "reqd": 1
+  },
+  {
+   "fieldname": "tax_type_code",
+   "fieldtype": "Select",
+   "label": "Tax Type Code",
+   "options": "\nA\nB\nC\nD\nE",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_catalogue",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "KE",
+   "fieldname": "origin_nation_code",
+   "fieldtype": "Data",
+   "label": "Origin Nation Code",
+   "reqd": 1
+  },
+  {
+   "fieldname": "package_unit_code",
+   "fieldtype": "Data",
+   "label": "Package Unit Code",
+   "reqd": 1
+  },
+  {
+   "fieldname": "quantity_unit_code",
+   "fieldtype": "Data",
+   "label": "Quantity Unit Code",
+   "reqd": 1
+  },
+  {
+   "fieldname": "pricing_section",
+   "fieldtype": "Section Break",
+   "label": "Pricing"
+  },
+  {
+   "description": "Required by DigiTax's item-create API. NEVER used for actual invoice amounts — those always come from the real Sales Invoice line. Set once, manually, by the accountant.",
+   "fieldname": "default_unit_price",
+   "fieldtype": "Currency",
+   "label": "Default Unit Price",
+   "reqd": 1
+  },
+  {
+   "fieldname": "sync_status_tab",
+   "fieldtype": "Tab Break",
+   "label": "Sync Status"
+  },
+  {
+   "fieldname": "digitax_id",
+   "fieldtype": "Data",
+   "label": "Digitax ID",
+   "read_only": 1
+  },
+  {
+   "fieldname": "etims_item_code",
+   "fieldtype": "Data",
+   "label": "eTIMS Item Code",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_sync",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "last_sync",
+   "fieldtype": "Datetime",
+   "label": "Last Sync",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-05 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Titan Digitax",
+ "name": "Digitax Item",
+ "naming_rule": "By script",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "item_name",
+ "track_changes": 1
+}

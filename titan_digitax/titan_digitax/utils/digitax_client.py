@@ -114,89 +114,106 @@ class DigitaxClient:
 		
 		return []
 	
-	def fetch_items(self, start_time=None, end_time=None):
+	def _paginate_items(self, params=None):
 		"""
-		Fetch items from Digitax with pagination support.
-		
+		Yield every item across GET /items pages for this company's account.
+
 		API Endpoint: GET /items
 		Response Format: {"pagination": {"next": "item_id", "page_size": 20}, "data": [...items...]}
-		
+
 		Pagination:
 		- API returns max 20 items per page
 		- Use 'after' parameter to get next page: /items?after=item_id
 		- Continue until page_size < 20 (indicates last page)
-		
+
+		This is a generator so a caller looking for one specific item (e.g.
+		find_item_by_name) can stop as soon as it finds a match, instead of always
+		paying for the full catalogue fetch — DigiTax's API has no server-side
+		search/filter by name, so any name lookup has to walk pages until found.
+		"""
+		params = dict(params or {})
+		page_count = 0
+		after_cursor = None
+
+		while True:
+			page_count += 1
+
+			if after_cursor:
+				params['after'] = after_cursor
+
+			frappe.logger().info(f"Fetching page {page_count} (after={after_cursor})...")
+
+			response = self._make_request("GET", "/items", params=params)
+
+			if not isinstance(response, dict):
+				frappe.logger().warning(f"Unexpected response format on page {page_count}")
+				break
+
+			items = response.get('data', [])
+			pagination = response.get('pagination', {})
+
+			if not isinstance(items, list):
+				frappe.logger().warning(f"No items in response on page {page_count}")
+				break
+
+			for item in items:
+				yield item
+
+			page_size = pagination.get('page_size', 0)
+			next_cursor = pagination.get('next')
+
+			# Stop if page_size < 20 (last page) or no next cursor
+			if page_size < 20 or not next_cursor:
+				break
+
+			after_cursor = next_cursor
+
+			# Safety check: prevent infinite loops (max 1000 pages = 20,000 items)
+			if page_count >= 1000:
+				frappe.logger().warning("Reached max page limit (1000) paginating /items")
+				break
+
+	def fetch_items(self, start_time=None, end_time=None):
+		"""
+		Fetch ALL items from Digitax (with pagination support).
+
 		Args:
 			start_time: Optional filter for items modified after this time
 			end_time: Optional filter for items modified before this time
-		
+
 		Returns:
 			List of all item records from Digitax (across all pages)
 		"""
 		frappe.logger().info("Fetching items from Digitax (with pagination)...")
-		
-		# Build base query parameters
+
 		params = {}
 		if start_time:
 			params['start_time'] = start_time
 		if end_time:
 			params['end_time'] = end_time
-		
-		all_items = []
-		page_count = 0
-		after_cursor = None
-		
-		while True:
-			page_count += 1
-			
-			# Add pagination cursor if we're fetching subsequent pages
-			if after_cursor:
-				params['after'] = after_cursor
-			
-			frappe.logger().info(f"Fetching page {page_count} (after={after_cursor})...")
-			
-			# Call Digitax API
-			response = self._make_request("GET", "/items", params=params)
-			
-			# Extract items and pagination info
-			if not isinstance(response, dict):
-				frappe.logger().warning(f"Unexpected response format on page {page_count}")
-				break
-			
-			items = response.get('data', [])
-			pagination = response.get('pagination', {})
-			
-			if not isinstance(items, list):
-				frappe.logger().warning(f"No items in response on page {page_count}")
-				break
-			
-			# Add items from this page
-			all_items.extend(items)
-			frappe.logger().info(f"Page {page_count}: Fetched {len(items)} items (total so far: {len(all_items)})")
-			
-			# Check if there are more pages
-			page_size = pagination.get('page_size', 0)
-			next_cursor = pagination.get('next')
-			
-			# Stop if page_size < 20 (last page) or no next cursor
-			if page_size < 20:
-				frappe.logger().info(f"Reached last page (page_size={page_size}). Total items: {len(all_items)}")
-				break
-			
-			if not next_cursor:
-				frappe.logger().info(f"No 'next' cursor in pagination. Total items: {len(all_items)}")
-				break
-			
-			# Set cursor for next iteration
-			after_cursor = next_cursor
-			
-			# Safety check: prevent infinite loops (max 1000 pages = 20,000 items)
-			if page_count >= 1000:
-				frappe.logger().warning(f"Reached max page limit (1000). Total items: {len(all_items)}")
-				break
-		
-		frappe.logger().info(f"Completed fetching all items: {len(all_items)} items across {page_count} pages")
+
+		all_items = list(self._paginate_items(params))
+		frappe.logger().info(f"Completed fetching all items: {len(all_items)} items")
 		return all_items
+
+	def find_item_by_name(self, item_name):
+		"""
+		Look for an existing DigiTax catalogue item with this exact item_name.
+
+		DigiTax's GET /items has no name filter — this walks pages until it finds
+		an exact match (or exhausts the catalogue), stopping as soon as one is
+		found rather than fetching everything first.
+
+		Returns the raw DigiTax item dict, or None if no match exists.
+		"""
+		target = (item_name or "").strip()
+		if not target:
+			return None
+
+		for item in self._paginate_items():
+			if (item.get("item_name") or "").strip() == target:
+				return item
+		return None
 	
 	def create_item(self, payload):
 		"""

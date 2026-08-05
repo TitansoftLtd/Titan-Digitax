@@ -7,41 +7,8 @@ from __future__ import annotations
 
 import frappe
 
-from titan_digitax.titan_digitax.utils import item_registry
-
+from titan_digitax.titan_digitax.utils import digitax_item_sync
 from titan_digitax.titan_digitax.utils.actionable import create_actionable_item
-
-
-def get_digitax_display_name(item_code, company, digitax_settings=None):
-	"""
-	Resolve DigiTax display name for an ERP Item (plan §2.1).
-
-	When require_digitax_item_name is ON: custom_digitax_item_name only.
-	When OFF: custom_digitax_item_name or item_name or item_code.
-	"""
-	if not item_code:
-		return None
-
-	if digitax_settings is None:
-		from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
-
-		digitax_settings = get_digitax_settings(company)
-	require_name = bool(digitax_settings.get("require_digitax_item_name", 1))
-
-	row = frappe.db.get_value(
-		"Item",
-		item_code,
-		["custom_digitax_item_name", "item_name", "item_code"],
-		as_dict=True,
-	)
-	if not row:
-		return None
-
-	digitax_name = (row.get("custom_digitax_item_name") or "").strip()
-	if require_name:
-		return digitax_name or None
-
-	return digitax_name or (row.get("item_name") or "").strip() or row.get("item_code")
 
 
 def _round_qty1_amount(amount):
@@ -64,7 +31,6 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 
 	require_name = bool(digitax_settings.get("require_digitax_item_name", 1))
 	require_sync = bool(digitax_settings.get("require_manual_item_sync", 1))
-	auto_sync = bool(digitax_settings.get("auto_sync_items_to_digitax", 0))
 
 	gate_failures = []
 	items_dict = {}  # display_name -> aggregated line
@@ -115,38 +81,33 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 			rate = abs(rate or 0)
 			amount = abs(amount or 0)
 
-		display_name = item_registry.get_display_name(item_code, doc.company, digitax_settings)
-		digitax_id = item_registry.get_digitax_id(item_code, doc.company)
+		digitax_item_name = digitax_item_sync.get_digitax_item_for_invoice_item(item_code, doc.company)
+		digitax_item = frappe.get_cached_doc("Digitax Item", digitax_item_name) if digitax_item_name else None
 
-		if require_name and not display_name:
+		if require_name and not digitax_item:
 			gate_failures.append(
 				{
 					"item_code": item_code,
 					"item_name": item_name,
 					"amount": amount,
-					"reason": "missing_digitax_item_name",
+					"reason": "missing_digitax_item_link",
 				}
 			)
 			continue
 
-		if not display_name:
-			display_name = (item_name or item_code or "").strip()
+		display_name = digitax_item.item_name if digitax_item else (item_name or item_code or "").strip()
+		digitax_id = digitax_item.digitax_id if digitax_item else None
 
 		if require_sync and not digitax_id:
-			if auto_sync:
-				digitax_id = _try_auto_sync_item(item_code, display_name, log, doc.company)
-			if not digitax_id:
-				gate_failures.append(
-					{
-						"item_code": item_code,
-						"item_name": item_name,
-						"amount": amount,
-						"reason": "missing_digitax_id",
-					}
-				)
-				continue
-		elif not digitax_id and auto_sync:
-			digitax_id = _try_auto_sync_item(item_code, display_name, log, doc.company)
+			gate_failures.append(
+				{
+					"item_code": item_code,
+					"item_name": item_name,
+					"amount": amount,
+					"reason": "missing_digitax_id",
+				}
+			)
+			continue
 
 		# Aggregate by display name (plan §2.1 v1: qty=1, sum amounts)
 		line_amount = abs(float(amount or 0))
@@ -180,12 +141,12 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 			if not doc.is_return:
 				entry["item_name"] = display_name
 				entry["item_class_code"] = (
-					frappe.db.get_value("Item", item_code, "custom_item_class_code")
+					(digitax_item.item_class_code if digitax_item else None)
 					or digitax_settings.get("default_item_class_code")
 					or "99020000"
 				)
 				entry["item_tax_type_code"] = (
-					frappe.db.get_value("Item", item_code, "custom_tax_type_code")
+					(digitax_item.tax_type_code if digitax_item else None)
 					or digitax_settings.get("default_item_tax_type_code")
 					or "D"
 				)
@@ -223,40 +184,6 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 
 	log.info(f"Built {len(payload_items)} DigiTax line(s) after aggregation by display name")
 	return {"ok": True, "items": payload_items}
-
-
-def _try_auto_sync_item(item_code, display_name, log, company=None):
-	"""Reuse this company's DigiTax ID for the display name, or create one via DigitaxClient.
-
-	Scoped to the company: the previous version matched on display name alone across
-	the whole database, so one company's catalogue id was copied onto another
-	company's item and its invoices were then filed under the wrong KRA registration.
-	"""
-	try:
-		src = item_registry.find_item_with_digitax_id(company, display_name) if company else None
-
-		if src and src.digitax_id:
-			item_registry.upsert_registration(
-				item_code,
-				company,
-				digitax_id=src.digitax_id,
-				digitax_etims_item_code=src.digitax_etims_item_code,
-				synced=1,
-			)
-			log.info(
-				f"Reused DigiTax ID {src.digitax_id} for {item_code} via display name "
-				f"'{display_name}' within {company}"
-			)
-			return src.digitax_id
-
-		from titan_digitax.titan_digitax.utils.items import sync_item_to_digitax
-
-		result = sync_item_to_digitax(item_code, company)
-		if result and result.get("status") == "success":
-			return result.get("digitax_id") or item_registry.get_digitax_id(item_code, company)
-	except Exception as e:
-		log.warning(f"Auto-sync failed for {item_code} ({company}): {e}")
-	return None
 
 
 def _apply_discounts(doc, items_dict, discount_items, total_discounts, log):
@@ -326,18 +253,18 @@ def _apply_discounts(doc, items_dict, discount_items, total_discounts, log):
 
 
 def _block_gate_failures(doc, gate_failures, require_name, require_sync, log):
-	missing_names = [g for g in gate_failures if g["reason"] == "missing_digitax_item_name"]
+	missing_links = [g for g in gate_failures if g["reason"] == "missing_digitax_item_link"]
 	missing_ids = [g for g in gate_failures if g["reason"] == "missing_digitax_id"]
 
 	parts = []
-	if missing_names:
+	if missing_links:
 		parts.append(
-			f"{len(missing_names)} item(s) missing Digitax Item Name: "
-			+ ", ".join(f"{g['item_code']}" for g in missing_names[:5])
+			f"{len(missing_links)} item(s) with no linked Digitax Item: "
+			+ ", ".join(f"{g['item_code']}" for g in missing_links[:5])
 		)
 	if missing_ids:
 		parts.append(
-			f"{len(missing_ids)} item(s) not synced to Digitax: "
+			f"{len(missing_ids)} item(s) linked to a Digitax Item that isn't synced yet: "
 			+ ", ".join(f"{g['item_code']}" for g in missing_ids[:5])
 		)
 	error_msg = "; ".join(parts)
@@ -352,7 +279,7 @@ def _block_gate_failures(doc, gate_failures, require_name, require_sync, log):
 			f"<p>{error_msg}</p>"
 			f"<ul>{''.join(f'<li>{g['item_code']} - {g['item_name']} ({g['reason']})</li>' for g in gate_failures)}</ul>"
 		),
-		action_required="Set Digitax Item Name and/or Sync to Digitax on the listed Items",
+		action_required="Link a Digitax Item and/or Sync it to Digitax for the listed Items",
 		reference_doctype="Sales Invoice",
 		reference_name=doc.name,
 		related_data=frappe.as_json({"gate_failures": gate_failures}),
