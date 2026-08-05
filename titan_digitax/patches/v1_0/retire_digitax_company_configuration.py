@@ -52,6 +52,10 @@ def execute():
 		doc.enabled = row.enabled
 		doc.description = row.description
 		doc.flags.ignore_permissions = True
+		# base_url/api_key are mandatory now (D19), but this legacy table never held
+		# credentials — retire_digitax_settings backfills base_url afterwards from the
+		# old Single, and api_key must be entered per company regardless.
+		doc.flags.ignore_mandatory = True
 		doc.insert()
 		migrated += 1
 
