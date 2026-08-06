@@ -218,6 +218,9 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
     # combined query spanning every enabled company.
     companies = [company] if company else get_enabled_digitax_companies()
 
+    attempted = 0
+    errors = []
+
     for comp in companies:
         if not is_digitax_enabled_for_company(comp):
             continue
@@ -250,9 +253,31 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
             filters["posting_date"] = ["between", [from_date, to_date]]
 
         invoices = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
+        attempted += len(invoices)
 
         for invoice in invoices:
-            send_sales_invoice_to_digitax(invoice)
+            try:
+                send_sales_invoice_to_digitax(invoice)
+            except Exception as e:
+                errors.append(f"{invoice}: {e}")
+
+    # Re-query rather than trust each call's return shape (send_sales_invoice_to_digitax
+    # returns different dict shapes for skip/error/success) — the field itself is the
+    # single source of truth for whether a send actually landed.
+    still_unsent = 0
+    if attempted:
+        filters = {"docstatus": 1, "custom_sent_to_digitax": 0}
+        filters["company"] = company if company else ["in", companies]
+        if invoice_name:
+            filters["name"] = invoice_name
+        still_unsent = frappe.db.count("Sales Invoice", filters)
+
+    return {
+        "attempted": attempted,
+        "sent": max(attempted - still_unsent, 0),
+        "still_unsent": still_unsent,
+        "errors": errors,
+    }
 
 @frappe.whitelist()
 def job_retry_sending_sales_invoices():

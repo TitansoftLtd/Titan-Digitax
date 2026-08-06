@@ -24,6 +24,18 @@
    "icon": "refresh-cw",
    "indent": 0,
    "keep_closed": 0,
+   "label": "Digitax Sync",
+   "link_to": "digitax-sync",
+   "link_type": "Page",
+   "show_arrow": 0,
+   "type": "Link"
+  },
+  {
+   "child": 0,
+   "collapsible": 1,
+   "icon": "list",
+   "indent": 0,
+   "keep_closed": 0,
    "label": "Digitax Sync Job",
    "link_to": "Digitax Sync Job",
    "link_type": "DocType",
@@ -90,7 +102,7 @@
    "type": "Link"
   }
  ],
- "modified": "2026-08-06 23:52:01.392644",
+ "modified": "2026-08-07 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Titan Digitax",
