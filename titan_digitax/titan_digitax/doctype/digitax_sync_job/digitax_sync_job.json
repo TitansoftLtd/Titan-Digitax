@@ -4,6 +4,7 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "direction",
   "company",
   "sync_type",
   "column_break_1",
@@ -19,6 +20,14 @@
  ],
  "fields": [
   {
+   "description": "Which way this sync run moves data. Determines which Sync Type options are offered.",
+   "fieldname": "direction",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Direction",
+   "options": "\nTo DigiTax\nFrom DigiTax"
+  },
+  {
    "description": "Company this sync run is for. Digitax Sync Job stays a Single, so this is set before each manual run and overwritten on the next.",
    "fieldname": "company",
    "fieldtype": "Link",
@@ -27,11 +36,12 @@
    "options": "Company"
   },
   {
+   "description": "Customers (From DigiTax) is a placeholder — DigiTax has no customer endpoint yet.",
    "fieldname": "sync_type",
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Sync Type",
-   "options": "\nCustomers\nItems"
+   "options": "\nInvoices\nCustomers\nItems"
   },
   {
    "default": "Pending",

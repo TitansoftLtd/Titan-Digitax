@@ -5,6 +5,19 @@ import frappe
 from frappe.model.document import Document
 from frappe.utils import now, now_datetime
 
+DIRECTION_TO_DIGITAX = "To DigiTax"
+DIRECTION_FROM_DIGITAX = "From DigiTax"
+
+# Which Sync Type values are valid for each Direction. "Customers" exists only as a
+# placeholder — DigiTax has no customer endpoint yet — and is special-cased in
+# execute_digitax_sync to return "coming soon" without enqueueing anything.
+SYNC_TYPES_BY_DIRECTION = {
+	DIRECTION_TO_DIGITAX: ["Invoices"],
+	DIRECTION_FROM_DIGITAX: ["Customers", "Items"],
+}
+
+NOT_YET_AVAILABLE_SYNC_TYPES = {"Customers"}
+
 
 class DigitaxSyncJob(Document):
 	"""DocType for tracking Digitax sync jobs."""
@@ -12,29 +25,47 @@ class DigitaxSyncJob(Document):
 
 
 @frappe.whitelist()
-def execute_digitax_sync(sync_type=None, company=None):
+def execute_digitax_sync(direction=None, sync_type=None, company=None):
 	"""
 	Entry point for UI-triggered sync.
 	Updates the single DocType record and enqueues background task.
 
 	Args:
-		sync_type: The type of sync to execute (Customers or Items)
+		direction: "To DigiTax" (push to DigiTax) or "From DigiTax" (pull from DigiTax)
+		sync_type: The type of sync to execute — valid options depend on direction,
+			see SYNC_TYPES_BY_DIRECTION
 		company: The company whose Digitax Company Settings to sync with
 	"""
-	# Validate sync type is provided and not empty
+	if not direction or direction.strip() == "":
+		frappe.throw("Please select a Direction before executing.")
+
+	if direction not in SYNC_TYPES_BY_DIRECTION:
+		frappe.throw(f"Invalid direction: {direction}.")
+
 	if not sync_type or sync_type.strip() == "":
 		frappe.throw("Please select a Sync Type before executing.")
 
 	if not company:
 		frappe.throw("Please select a Company before executing.")
 
-	# Validate sync type is a valid option
-	valid_types = ["Customers", "Items"]
+	valid_types = SYNC_TYPES_BY_DIRECTION[direction]
 	if sync_type not in valid_types:
-		frappe.throw(f"Invalid sync type: {sync_type}. Must be one of: {', '.join(valid_types)}")
+		frappe.throw(
+			f"'{sync_type}' is not a valid Sync Type for {direction}. "
+			f"Must be one of: {', '.join(valid_types)}"
+		)
+
+	if sync_type in NOT_YET_AVAILABLE_SYNC_TYPES:
+		# No status change, nothing enqueued — this option exists as a placeholder for
+		# when DigiTax exposes the endpoint. The last real job's status is left alone.
+		return {
+			"status": "unavailable",
+			"message": f"{sync_type} sync is not available yet. Coming soon.",
+		}
 
 	# Update status fields in the single document
 	frappe.db.set_single_value("Digitax Sync Job", {
+		"direction": direction,
 		"company": company,
 		"status": "Running",
 		"started_at": now_datetime(),
@@ -109,7 +140,7 @@ def run_digitax_sync(sync_type, company, start_time=None, end_time=None):
 	Core sync function that can be called by UI or scheduler.
 
 	Args:
-		sync_type: "Customers" or "Items"
+		sync_type: "Invoices", "Customers", or "Items"
 		company: The company whose Digitax Company Settings to sync with
 		start_time: Optional datetime for filtering (used by scheduler)
 		end_time: Optional datetime for filtering (used by scheduler)
@@ -120,12 +151,47 @@ def run_digitax_sync(sync_type, company, start_time=None, end_time=None):
 	frappe.logger().info(f"Starting Digitax sync for type: {sync_type}, company: {company}")
 
 	# Route to specific sync handler
-	if sync_type == "Customers":
+	if sync_type == "Invoices":
+		return sync_invoices_to_digitax(company)
+	elif sync_type == "Customers":
 		return sync_customers_from_digitax(company, start_time, end_time)
 	elif sync_type == "Items":
 		return sync_items_from_digitax(company, start_time, end_time)
 	else:
 		frappe.throw(f"Unknown sync type: {sync_type}")
+
+
+def sync_invoices_to_digitax(company):
+	"""
+	Push this company's not-yet-sent Sales Invoices to DigiTax (manual, on-demand
+	version of the hourly retry cron — titan_digitax.utils.sales.job_retry_sending_sales_invoices).
+
+	Args:
+		company: The company whose unsent invoices to (re)send
+
+	Returns:
+		dict: Summary with attempted/sent/still_unsent counts
+	"""
+	from titan_digitax.titan_digitax.utils.sales import retry_sending_sales_invoice_to_digitax
+
+	frappe.logger().info(f"DIGITAX INVOICE SYNC: Starting sync to Digitax for {company}")
+
+	result = retry_sending_sales_invoice_to_digitax(company=company)
+	attempted = result.get("attempted", 0)
+	sent = result.get("sent", 0)
+	still_unsent = result.get("still_unsent", 0)
+	errors = result.get("errors", [])
+
+	summary = f"Invoices synced to Digitax: Attempted={attempted}, Sent={sent}, Still Unsent={still_unsent}"
+	frappe.logger().info(summary)
+
+	return {
+		"summary": summary,
+		"created": sent,
+		"updated": 0,
+		"skipped": still_unsent,
+		"errors": errors,
+	}
 
 
 def sync_customers_from_digitax(company, start_time=None, end_time=None):
