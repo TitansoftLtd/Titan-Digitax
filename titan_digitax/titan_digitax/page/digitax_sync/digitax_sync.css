@@ -1,0 +1,31 @@
+/* Frappe v16 zeroes the page gutter (`.page-container .page-body { padding: 0 }`)
+   and only re-adds padding / max-width through route-scoped rules such as
+   `[data-page-route="Workspaces"]`. Custom Desk pages get none of that, so this
+   page supplies its own gutter — mirrors st_austins' engage_sync.css.
+
+   Loaded automatically by Page.load_assets() as the sibling of the page .js —
+   no bundle or `bench build` required. */
+
+.digitax-sync-page {
+	margin: 0 auto;
+	padding: var(--padding-md) var(--padding-lg) var(--padding-xl);
+}
+
+/* Match the rest of Desk: centred and clamped, unless the user has turned on
+   the Full Width toggle (toolbar.js sets `body.full-width`). */
+body:not(.full-width) .digitax-sync-page {
+	max-width: var(--page-max-width);
+}
+
+/* The jobs table has several columns — scroll it instead of overflowing the page. */
+.digitax-sync-page .digitax-sync-jobs-scroll {
+	overflow-x: auto;
+}
+
+/* Align the action buttons with the bottom of the selects beside them. */
+.digitax-sync-page .digitax-sync-actions {
+	display: flex;
+	align-items: flex-end;
+	height: 100%;
+	padding-bottom: 2px;
+}

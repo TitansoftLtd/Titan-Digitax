@@ -1,0 +1,9 @@
+{
+ "name": "digitax-sync",
+ "title": "Digitax Sync",
+ "doctype": "Page",
+ "module": "Titan Digitax",
+ "standard": "Yes",
+ "beta": 0,
+ "developer_mode_only": 0
+}
