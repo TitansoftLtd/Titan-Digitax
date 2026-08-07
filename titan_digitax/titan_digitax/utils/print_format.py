@@ -27,7 +27,6 @@ TAX_CLASS_RATES = {
 	"E": 8,
 }
 
-DEFAULT_LOGO_URL = "http://mamba.braeburn.com/files/Braeburn%20Logo.svg"
 ALLOWED_DIGITAX_RECEIPT_HOSTS = frozenset({"receipt.dg.tax"})
 DIGITAX_RECEIPT_VIEWPORT = {"width": 1280, "height": 900}
 DIGITAX_RECEIPT_LOAD_TIMEOUT_MS = 60000
@@ -299,7 +298,7 @@ def get_active_digitax_details(doc):
 def _get_company_logo_url(company_name):
 	logo = frappe.db.get_value("Company", company_name, "company_logo")
 	if not logo:
-		return DEFAULT_LOGO_URL
+		return ""
 
 	if logo.startswith(("http://", "https://")):
 		return logo
@@ -379,4 +378,82 @@ def get_digitax_print_context(doc):
 		"scu_invoice_no": scu_invoice_no,
 		"invoice_name": doc.name,
 		"posting_date": doc.posting_date,
+	}
+
+
+def get_school_invoice_print_context(doc):
+	"""Build the print context used by the Sales Invoice(Digitax) print format.
+
+	The Fees table shows the actual item(s) built by build_digitax_items_payload —
+	the same aggregation that is literally POSTed to DigiTax — not the raw Sales
+	Invoice lines, so what's printed always matches what was sent.
+	"""
+	if isinstance(doc, str):
+		doc = frappe.get_doc("Sales Invoice", doc)
+	from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
+	from titan_digitax.titan_digitax.utils.sales_items import build_digitax_items_payload
+
+	digitax_settings = get_digitax_settings(doc.company)
+	currency = doc.currency or frappe.db.get_value("Company", doc.company, "default_currency")
+
+	logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
+	built = build_digitax_items_payload(doc, digitax_settings, logger)
+
+	if built.get("ok"):
+		raw_items = built["items"]
+		items = [
+			{
+				"description": entry.get("item_name") or entry.get("item_description") or "School Fees",
+				"amount": entry.get("total_amount") or 0,
+				"formatted_amount": fmt_money(entry.get("total_amount") or 0, currency=currency),
+			}
+			for entry in raw_items
+		]
+		invoice_total = sum(entry.get("total_amount") or 0 for entry in raw_items)
+	else:
+		# Nothing valid was built for Digitax (e.g. missing item links) — fall back to
+		# the raw invoice lines so the printout isn't empty.
+		items = [
+			{
+				"description": row.item_name or row.description or row.item_code,
+				"amount": abs(row.amount or 0),
+				"formatted_amount": fmt_money(abs(row.amount or 0), currency=currency),
+			}
+			for row in doc.items
+		]
+		invoice_total = abs(doc.grand_total or 0)
+
+	company = _get_company_details(doc.company)
+	company["tagline"] = digitax_settings.get("print_tagline") or ""
+	company["po_box"] = digitax_settings.get("po_box") or ""
+
+	customer_code = frappe.db.get_value("Customer", doc.customer, "customer_code") or ""
+	reference_no = getattr(doc, "custom_engage_invoice_number", None) or doc.name
+
+	return {
+		"document_title": "Credit Note" if doc.is_return else "Invoice",
+		"company": company,
+		"reference_no": reference_no,
+		"posting_date": doc.posting_date,
+		"due_date": doc.due_date,
+		"customer": {
+			"name": doc.customer_name or doc.customer or "",
+			"account_code": customer_code,
+		},
+		"fee_items": items,
+		"currency": currency,
+		"formatted_invoice_total": fmt_money(invoice_total, currency=currency),
+		"formatted_total_due": fmt_money(abs(doc.outstanding_amount or 0), currency=currency),
+		"payment": {
+			"bank_name": digitax_settings.get("bank_name") or "",
+			"bank_account_name": digitax_settings.get("bank_account_name") or "",
+			"bank_account_no": digitax_settings.get("bank_account_no") or "",
+			"bank_branch": digitax_settings.get("bank_branch") or "",
+			"bank_branch_code": digitax_settings.get("bank_branch_code") or "",
+			"bank_swift_code": digitax_settings.get("bank_swift_code") or "",
+			"mpesa_paybill": digitax_settings.get("mpesa_paybill") or "",
+			"mpesa_paybill_account": digitax_settings.get("mpesa_paybill_account") or "",
+		},
+		"notes": digitax_settings.get("print_notes") or "",
+		"term_opening_date": digitax_settings.get("term_opening_date") or "",
 	}
