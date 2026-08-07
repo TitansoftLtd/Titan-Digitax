@@ -13,7 +13,7 @@ required_apps = ["frappe/erpnext"]
 fixtures = [
     # export only those records that match the filters from the Role table
     {"dt": "Custom Field", "filters": { "module": "Titan Digitax" }},
-    {"dt": "Print Format", "filters": [["name", "in", ["Digitax Tax Invoice"]]]},
+    {"dt": "Print Format", "filters": [["name", "in", ["Digitax Tax Invoice", "Sales Invoice(Digitax)"]]]},
 ]
 
 # Each item in the list will be shown as an app in the apps page
@@ -88,6 +88,7 @@ jinja = {
 	"methods": [
 		"titan_digitax.titan_digitax.utils.print_format.get_digitax_print_context",
 		"titan_digitax.titan_digitax.utils.print_format.get_qr_code_data_uri",
+		"titan_digitax.titan_digitax.utils.print_format.get_school_invoice_print_context",
 	],
 }
 
