@@ -1,0 +1,122 @@
+{% set ctx = get_school_invoice_print_context(doc) %}
+
+<div class="sid-invoice">
+  <div class="sid-header">
+    {% if ctx.company.logo_url %}
+    <img class="sid-logo" src="{{ ctx.company.logo_url }}" alt="Logo" />
+    {% endif %}
+    <div class="sid-school-name">{{ ctx.company.name }}</div>
+    {% if ctx.company.tagline %}
+    <div class="sid-tagline">{{ ctx.company.tagline }}</div>
+    {% endif %}
+    <div class="sid-contact-line">
+      {%- if ctx.company.email -%}Email: {{ ctx.company.email }}{%- endif -%}
+      {%- if ctx.company.email and ctx.company.phone %}, {% endif -%}
+      {%- if ctx.company.phone -%}Phone: {{ ctx.company.phone }}{%- endif -%}
+      {%- if ctx.company.po_box %}, P.O. Box {{ ctx.company.po_box }}{% endif -%}
+    </div>
+  </div>
+
+  <div class="sid-title-row">
+    <div class="sid-doc-title">{{ ctx.document_title }}</div>
+  </div>
+
+  <div class="sid-info-box">
+    <table class="sid-info-table">
+      <tr>
+        <td class="sid-info-label">Reference No :</td>
+        <td class="sid-info-value">{{ ctx.reference_no }}</td>
+      </tr>
+      <tr>
+        <td class="sid-info-label">Invoice Date :</td>
+        <td class="sid-info-value">{{ ctx.posting_date }}</td>
+      </tr>
+      <tr>
+        <td class="sid-info-label">Contact Name :</td>
+        <td class="sid-info-value">{{ ctx.customer.name }}</td>
+      </tr>
+      {% if ctx.customer.account_code %}
+      <tr>
+        <td class="sid-info-label">Account Code :</td>
+        <td class="sid-info-value">{{ ctx.customer.account_code }}</td>
+      </tr>
+      {% endif %}
+    </table>
+  </div>
+
+  <table class="sid-fees-table">
+    <thead>
+      <tr>
+        <th>Description</th>
+        <th class="sid-text-right">Amount</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in ctx.fee_items %}
+      <tr>
+        <td>{{ item.description }}</td>
+        <td class="sid-text-right">{{ item.formatted_amount }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="sid-total-row">
+    <span class="sid-total-label">Invoice Total</span>
+    <span class="sid-total-value">{{ ctx.formatted_invoice_total }}</span>
+  </div>
+
+  {% if ctx.offline_url %}
+  <div class="sid-qr-section">
+    <img class="sid-qr-image" src="{{ get_qr_code_data_uri(ctx.offline_url) }}" alt="Digitax verification QR code" />
+    <div class="sid-qr-label">Scan to verify eTIMS receipt</div>
+  </div>
+  {% endif %}
+
+  <table class="sid-footer">
+    <tr>
+      <td class="sid-payment-details">
+        <div class="sid-footer-title">Payment details</div>
+        {% if ctx.payment.bank_name %}<div><span class="sid-footer-label">Bank</span> : {{ ctx.payment.bank_name }}</div>{% endif %}
+        {% if ctx.payment.bank_account_name %}<div><span class="sid-footer-label">Account Name</span> : {{ ctx.payment.bank_account_name }}</div>{% endif %}
+        {% if ctx.payment.bank_account_no %}<div><span class="sid-footer-label">Account Number</span> :{{ ctx.payment.bank_account_no }}</div>{% endif %}
+        {% if ctx.payment.bank_branch %}<div><span class="sid-footer-label">Branch Name</span> : {{ ctx.payment.bank_branch }}</div>{% endif %}
+        {% if ctx.payment.bank_branch_code or ctx.payment.bank_swift_code %}
+        <div>
+          {%- if ctx.payment.bank_branch_code -%}<span class="sid-footer-label">Branch Code</span> : {{ ctx.payment.bank_branch_code }}{%- endif -%}
+          {%- if ctx.payment.bank_swift_code %}&nbsp;&nbsp;<span class="sid-footer-label">Swift:</span> {{ ctx.payment.bank_swift_code }}{% endif -%}
+        </div>
+        {% endif %}
+        {% if ctx.payment.mpesa_paybill %}
+        <div><span class="sid-footer-label">Mpesa Paybill</span> : {{ ctx.payment.mpesa_paybill }}{% if ctx.payment.mpesa_paybill_account %} Account: {{ ctx.payment.mpesa_paybill_account }}{% endif %}</div>
+        {% endif %}
+      </td>
+      <td class="sid-notes">
+        <div class="sid-footer-title">NOTES:</div>
+        {% if ctx.notes %}<div class="sid-notes-text">{{ ctx.notes | replace("\n", "<br>") }}</div>{% endif %}
+        {% if ctx.term_opening_date %}<div><b>Official School Opening Date</b> {{ ctx.term_opening_date }}</div>{% endif %}
+        {% if ctx.company.email %}<div>Please email your remittance and any queries to: <b>{{ ctx.company.email }}</b></div>{% endif %}
+      </td>
+    </tr>
+  </table>
+
+  <div class="sid-remittance">
+    <div class="sid-remittance-title">Remittance Advice:</div>
+    <table class="sid-remittance-body">
+      <tr>
+        <td class="sid-remittance-left">
+          <div>Contact Name : {{ ctx.customer.name }}</div>
+          {% if ctx.customer.account_code %}<div>Account Code : {{ ctx.customer.account_code }}</div>{% endif %}
+          <div>Invoice Number : {{ ctx.reference_no }}</div>
+          <div>Invoice Date : {{ ctx.posting_date }}</div>
+          {% if ctx.due_date %}<div class="sid-due-note">Payment is due on or before {{ ctx.due_date }}</div>{% endif %}
+        </td>
+        <td class="sid-remittance-right">
+          <table class="sid-total-due-box">
+            <tr><td>Total Due</td><td class="sid-text-right">{{ ctx.formatted_total_due }}</td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </div>
+</div>
