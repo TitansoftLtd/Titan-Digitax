@@ -47,14 +47,14 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
                                     <option value="">${__("Select Direction first")}</option>
                                 </select>
                             </div>
-                            <div class="form-group mt-2" data-fieldname="company-group">
-                                <label class="control-label">${__("Company")}</label>
-                                <div data-fieldname="company-control"></div>
-                            </div>
                         </div>
                     </div>
                 </div>
                 <div class="col-md-6">
+                    <div class="form-group" data-fieldname="company-group">
+                        <label class="control-label">${__("Company")}</label>
+                        <div data-fieldname="company-control"></div>
+                    </div>
                     <div class="mb-3 digitax-sync-actions">
                         <button class="btn btn-primary" data-action="execute">${__("Execute Sync")}</button>
                         <button class="btn btn-secondary ml-2" data-action="refresh" style="display:none;">${__("Refresh Status")}</button>
@@ -203,7 +203,64 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
 		});
 	}
 
+	let jobsByName = {};
+
+	function showJobDetails(job) {
+		const fields = [
+			[__("Direction"), frappe.utils.escape_html(job.direction || "-")],
+			[__("Sync Type"), frappe.utils.escape_html(job.sync_type || "-")],
+			[__("Company"), frappe.utils.escape_html(job.company || "-")],
+			[__("Status"), getStatusBadge(job.status)],
+			[__("Progress"), `${job.percentage_complete || 0}%`],
+			[__("Records"), `${job.processed_records || 0} / ${job.total_records || 0}`],
+			[__("Skipped"), job.skipped_records || 0],
+			[__("Errors"), job.errors || 0],
+			[__("Started By"), frappe.utils.escape_html(job.owner_name || job.owner || "-")],
+			[__("Started At"), formatDateTime(job.started_at)],
+			[__("Ended At"), formatDateTime(job.ended_at)],
+			[__("Job ID"), frappe.utils.escape_html(job.job_id || job.name || "-")],
+		];
+
+		const rows = fields
+			.map(
+				([label, value]) => `
+                <tr>
+                    <td style="width: 160px; font-weight: 600; color: #555;">${label}</td>
+                    <td>${value}</td>
+                </tr>`
+			)
+			.join("");
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Sync Job Details"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "details_html",
+					options: `
+                        <table class="table table-bordered table-sm" style="font-size: 13px;">
+                            <tbody>${rows}</tbody>
+                        </table>
+                        <div style="font-weight: 600; color: #555; margin-bottom: 4px;">${__("Message")}</div>
+                        <div class="text-muted" style="white-space: pre-wrap; word-break: break-word;">
+                            ${frappe.utils.escape_html(job.last_message || "-")}
+                        </div>
+                    `,
+				},
+			],
+			primary_action_label: __("Open Sync Job"),
+			primary_action: () => {
+				dialog.hide();
+				frappe.set_route("Form", "Digitax Sync Job", job.name);
+			},
+		});
+		dialog.show();
+	}
+
 	function renderJobList(jobs) {
+		jobsByName = {};
+		jobs.forEach((job) => (jobsByName[job.name] = job));
+
 		if (!jobs.length) {
 			jobListTable.html(`<div class="text-muted text-center py-3">${__("No sync jobs found")}</div>`);
 			return;
@@ -222,7 +279,7 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
                         <th>${__("Errors")}</th>
                         <th>${__("Started By")}</th>
                         <th>${__("Started At")}</th>
-                        <th>${__("Message")}</th>
+                        <th>${__("Details")}</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -250,9 +307,10 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
                     <td>${job.errors || 0}</td>
                     <td>${frappe.utils.escape_html(job.owner_name || job.owner)}${userBadge}</td>
                     <td>${formatDateTime(job.started_at)}</td>
-                    <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"
-                        title="${frappe.utils.escape_html(job.last_message || "")}">
-                        ${frappe.utils.escape_html(job.last_message || "-")}
+                    <td>
+                        <button class="btn btn-xs btn-default" data-action="view-job-details" data-name="${frappe.utils.escape_html(job.name)}">
+                            ${__("View Details")}
+                        </button>
                     </td>
                 </tr>
             `;
@@ -261,6 +319,11 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
 		html += `</tbody></table>`;
 		jobListTable.html(html);
 	}
+
+	jobListTable.on("click", '[data-action="view-job-details"]', function () {
+		const job = jobsByName[$(this).attr("data-name")];
+		if (job) showJobDetails(job);
+	});
 
 	refreshJobsBtn.on("click", function () {
 		$(this).find("i").addClass("fa-spin");

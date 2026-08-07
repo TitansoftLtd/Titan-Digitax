@@ -9,12 +9,7 @@
 .digitax-sync-page {
 	margin: 0 auto;
 	padding: var(--padding-md) var(--padding-lg) var(--padding-xl);
-}
-
-/* Match the rest of Desk: centred and clamped, unless the user has turned on
-   the Full Width toggle (toolbar.js sets `body.full-width`). */
-body:not(.full-width) .digitax-sync-page {
-	max-width: var(--page-max-width);
+	width: 100%;
 }
 
 /* The jobs table has several columns — scroll it instead of overflowing the page. */
