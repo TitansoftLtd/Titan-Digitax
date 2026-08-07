@@ -159,7 +159,8 @@ const add_print_digitax_button = (frm) => {
 		// 	encodeURIComponent(frm.doc.name);
 		// window.open(download_url);
 
-		frappe.utils.print(frm.doctype, frm.doc.name, "Sales Invoice(Digitax)");
+		// Legacy local print format — uncomment to revert if client prefers the in-app layout:
+		frappe.utils.print(frm.doctype, frm.doc.name, "Fee Note PF");
 	}, __("Digitax Actions"));
 };
 

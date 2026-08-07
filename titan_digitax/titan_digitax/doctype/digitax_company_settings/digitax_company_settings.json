@@ -47,23 +47,7 @@
   "default_receipt_type_code",
   "column_break_status",
   "cancelled_invoice_status_code",
-  "default_payment_type_code",
-  "print_invoice_section",
-  "print_tagline",
-  "po_box",
-  "column_break_print_1",
-  "print_notes",
-  "term_opening_date",
-  "bank_details_section",
-  "bank_name",
-  "bank_account_name",
-  "bank_account_no",
-  "column_break_print_2",
-  "bank_branch",
-  "bank_branch_code",
-  "bank_swift_code",
-  "mpesa_paybill",
-  "mpesa_paybill_account"
+  "default_payment_type_code"
  ],
  "fields": [
   {
@@ -341,87 +325,6 @@
    "fieldname": "default_payment_type_code",
    "fieldtype": "Data",
    "label": "Default Payment Type Code"
-  },
-  {
-   "description": "Used by the Sales Invoice(Digitax) print format. Leave blank to omit a field from the printout entirely.",
-   "fieldname": "print_invoice_section",
-   "fieldtype": "Section Break",
-   "label": "Print / Invoice Details"
-  },
-  {
-   "description": "Shown under the company name on the printed invoice, e.g. a school motto.",
-   "fieldname": "print_tagline",
-   "fieldtype": "Data",
-   "label": "Print Tagline"
-  },
-  {
-   "fieldname": "po_box",
-   "fieldtype": "Data",
-   "label": "P.O. Box"
-  },
-  {
-   "fieldname": "column_break_print_1",
-   "fieldtype": "Column Break"
-  },
-  {
-   "description": "Free text shown in the NOTES box on the printed invoice.",
-   "fieldname": "print_notes",
-   "fieldtype": "Small Text",
-   "label": "Print Notes"
-  },
-  {
-   "fieldname": "term_opening_date",
-   "fieldtype": "Date",
-   "label": "Official School Opening Date"
-  },
-  {
-   "fieldname": "bank_details_section",
-   "fieldtype": "Section Break",
-   "label": "Bank & Payment Details"
-  },
-  {
-   "fieldname": "bank_name",
-   "fieldtype": "Data",
-   "label": "Bank Name"
-  },
-  {
-   "fieldname": "bank_account_name",
-   "fieldtype": "Data",
-   "label": "Bank Account Name"
-  },
-  {
-   "fieldname": "bank_account_no",
-   "fieldtype": "Data",
-   "label": "Bank Account Number"
-  },
-  {
-   "fieldname": "column_break_print_2",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "bank_branch",
-   "fieldtype": "Data",
-   "label": "Bank Branch Name"
-  },
-  {
-   "fieldname": "bank_branch_code",
-   "fieldtype": "Data",
-   "label": "Bank Branch Code"
-  },
-  {
-   "fieldname": "bank_swift_code",
-   "fieldtype": "Data",
-   "label": "Bank Swift Code"
-  },
-  {
-   "fieldname": "mpesa_paybill",
-   "fieldtype": "Data",
-   "label": "Mpesa Paybill"
-  },
-  {
-   "fieldname": "mpesa_paybill_account",
-   "fieldtype": "Data",
-   "label": "Mpesa Paybill Account"
   }
  ],
  "index_web_pages_for_search": 1,
