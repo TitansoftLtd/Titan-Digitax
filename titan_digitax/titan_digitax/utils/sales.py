@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 from frappe import _
 from frappe.utils import now_datetime
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
-from .company_config import is_digitax_enabled_for_company, get_enabled_digitax_companies
+from .company_config import (
+    is_digitax_enabled_for_company,
+    get_enabled_digitax_companies,
+    get_digitax_settings,
+)
+from .sales_items import build_digitax_items_payload
 
 
 @frappe.whitelist()
@@ -30,37 +35,31 @@ def send_sales_invoice_to_digitax(docname):
         logger.error(f"Failed to get Sales Invoice document: {str(e)}")
         return {"error": "Failed to load invoice", "message": str(e)}
 
-    # Load Digitax Settings first (needed for all subsequent checks)
-    try:
-        digitax_settings = frappe.get_single("Digitax Settings")
-        logger.info(f"Digitax Settings loaded successfully")
-        
-        # If not enabled, skip silently (no error log, no processing)
-        if not digitax_settings.get("enable"):
-            logger.info(f"Skipping: Digitax integration disabled in settings")
-            return {"skipped": True, "reason": "Digitax integration disabled"}
-            
-    except Exception as e:
-        logger.warning(f"Could not access Digitax Settings: {str(e)}")
-        return {"error": "Digitax Settings not accessible", "message": str(e)}
+    # Load this company's Digitax Company Settings first (needed for all subsequent checks)
+    if not frappe.db.exists("Digitax Company Settings", doc.company):
+        logger.info(f"Skipping: No Digitax Company Settings configured for {doc.company}")
+        return {"skipped": True, "reason": "Digitax not configured for this company"}
 
-    # Check company country against target country from settings
+    digitax_settings = get_digitax_settings(doc.company)
+    logger.info(f"Digitax Company Settings loaded for {doc.company}")
+
+    # Check company country against this company's own target country
     company_country = frappe.db.get_value("Company", doc.company, "country")
     target_country = digitax_settings.get("target_country") or "Kenya"
     logger.info(f"Company Country Check: {company_country}, Target: {target_country}")
     if not company_country == target_country:
         logger.info(f"Skipping: Company not in {target_country} (Country: {company_country})")
         return {"skipped": True, "reason": f"Company not in {target_country}"}
-    
-    # Check if this company has an enabled row in Digitax Settings.
+
+    # Check if this company is enabled for DigiTax.
     # Credit notes (is_return=1) and invoices that already have a custom_sale_id are allowed
     # through regardless so that reversals and amendments never get blocked even when a company
     # is later disabled (send-block, amend-allow policy).
     is_amendment_or_return = bool(doc.is_return or doc.get("custom_sale_id"))
     if not is_amendment_or_return:
-        if not is_digitax_enabled_for_company(doc.company, digitax_settings):
-            logger.info(f"Skipping: Company {doc.company} has no enabled row in Digitax Settings")
-            return {"skipped": True, "reason": "Company not enabled in Digitax Settings"}
+        if not is_digitax_enabled_for_company(doc.company):
+            logger.info(f"Skipping: Company {doc.company} is not enabled for Digitax")
+            return {"skipped": True, "reason": "Company not enabled for Digitax"}
     else:
         logger.info(f"Company eligibility check bypassed for credit note / amendment (is_return={doc.is_return}, custom_sale_id={doc.get('custom_sale_id')})")
 
@@ -75,11 +74,28 @@ def send_sales_invoice_to_digitax(docname):
     submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
     cancelled_status = digitax_settings.get("cancelled_invoice_status_code") or "04"
     
+    # Persist the trader invoice number BEFORE sending. DigiTax echoes this value back
+    # on the async callback, which resolves the invoice by
+    # {"custom_trader_invoice_number": ...} first. The field used to be read in four
+    # places and never written, so resolution fell through to matching the docname —
+    # and since "/" is rewritten to "_" here, any invoice whose name contains a slash
+    # could never be matched and silently lost every callback.
+    trader_invoice_number = _get_trader_invoice_base(doc)
+    if doc.custom_trader_invoice_number != trader_invoice_number:
+        frappe.db.set_value(
+            "Sales Invoice",
+            doc.name,
+            "custom_trader_invoice_number",
+            trader_invoice_number,
+            update_modified=False,
+        )
+        doc.custom_trader_invoice_number = trader_invoice_number
+
     payload = {
-        "trader_invoice_number": str(doc.custom_trader_invoice_number or (doc.name.replace("/", "_") if doc.name else "")),
+        "trader_invoice_number": trader_invoice_number,
         "items": [],
         "invoice_status_code": submitted_status if doc.docstatus == 1 else cancelled_status,
-        "callback_url": get_digitax_callback_url_for_sales_with_items(),
+        "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
     }
 
     customer_pin = resolve_digitax_customer_pin(doc)
@@ -111,37 +127,21 @@ def send_sales_invoice_to_digitax(docname):
             frappe.msgprint(f"Original sale not found in Digitax. Cannot process credit note for {doc.name}.")
             return
 
-    # For credit notes, grand_total is negative, so we use abs() to get positive value
-    amount = abs(doc.grand_total)
-    logger.info(f"Calculated amount: {amount} (Original grand_total: {doc.grand_total})")
-    
-    # Get item details from settings
-    item_bar_code = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
-    item_name = digitax_settings.get("default_item_name") or "School Fees"
-    item_description = digitax_settings.get("default_item_description") or "School Fees"
-    
-    new_item = {
-        "item_bar_code": item_bar_code,
-        "quantity": 1,
-        "unit_price": amount,
-        "total_amount": amount,
-        "package_unit_quantity": amount,
-        "discount_rate": 0,
-        "discount_amount": 0,
-        "item_description": item_description,
-    }
+    # D9/D14: aggregate SI lines by DigiTax display name (Digitax Item Name when required)
+    built = build_digitax_items_payload(doc, digitax_settings, logger)
+    if not built.get("ok"):
+        return {
+            "skipped": True,
+            "reason": built.get("reason"),
+            "message": built.get("message"),
+        }
 
-    if not doc.is_return:
-        new_item["item_name"] = item_name
-        # Use default values from Digitax Settings
-        new_item["item_class_code"] = digitax_settings.get("default_item_class_code") or "99020000"
-        new_item["item_tax_type_code"] = digitax_settings.get("default_item_tax_type_code") or "D"
-        new_item["is_stockable"] = bool(digitax_settings.get("default_is_stockable"))
+    payload["items"] = built["items"]
+    logger.info(f"Items added to payload ({len(payload['items'])} line(s)): {payload['items']}")
 
-    payload["items"].append(new_item)
-    logger.info(f"Item added to payload: {new_item}")
-
-    response_data, status_code = _post_to_digitax(endpoint, payload, digitax_settings, logger)
+    response_data, status_code = _post_to_digitax(
+        endpoint, payload, digitax_settings, logger, company=doc.company
+    )
 
     if status_code == 0:
         error_msg = response_data.get("message", "Connection error sending to Digitax")
@@ -213,44 +213,71 @@ def send_sales_invoice_to_digitax(docname):
 
 @frappe.whitelist()
 def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from_date=None, to_date=None, retry_count=None):
-    digitax_settings = frappe.get_single("Digitax Settings")
-    target_country = digitax_settings.get("target_country") or "Kenya"
-    
-    # Get max retry attempts from settings if not provided (ensure it's an int and positive)
-    if retry_count is None:
-        try:
-            retry_count = int(digitax_settings.get("max_retry_attempts") or 5)
-            if retry_count <= 0:
-                retry_count = 5  # Fallback to default if invalid
-        except (ValueError, TypeError):
-            retry_count = 5  # Fallback if conversion fails
-    
-    # Use the Digitax-owned enablement table rather than Company.custom_enable_company,
-    # intersected with target_country as a defensive backstop.
-    target_country_companies = set(frappe.get_all(
-        "Company", filters={"country": target_country, "is_group": 0}, pluck="name"
-    ))
-    valid_companies = [
-        c for c in get_enabled_digitax_companies(digitax_settings)
-        if c in target_country_companies
-    ]
-    filters = {
-        "docstatus": 1,
-        "custom_sent_to_digitax": 0,
-        "company": ["in", valid_companies],
-        "custom_retry_count": ["<", retry_count],
-    }
-    if invoice_name:
-        filters["name"] = invoice_name
-    if from_date and to_date:
-        filters["posting_date"] = ["between", [from_date, to_date]]
-    if company:
-        filters["company"] = company
-    
-    invoices = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
+    # Every setting (target country, max retries) is per company now, so each company's
+    # invoices are queried separately using that company's own values rather than one
+    # combined query spanning every enabled company.
+    companies = [company] if company else get_enabled_digitax_companies()
 
-    for invoice in invoices:
-        send_sales_invoice_to_digitax(invoice)
+    attempted = 0
+    errors = []
+
+    for comp in companies:
+        if not is_digitax_enabled_for_company(comp):
+            continue
+
+        settings = get_digitax_settings(comp)
+        target_country = settings.get("target_country") or "Kenya"
+        company_country = frappe.db.get_value("Company", comp, "country")
+        if company_country != target_country:
+            continue
+
+        if retry_count is None:
+            try:
+                comp_retry_count = int(settings.get("max_retry_attempts") or 5)
+                if comp_retry_count <= 0:
+                    comp_retry_count = 5  # Fallback to default if invalid
+            except (ValueError, TypeError):
+                comp_retry_count = 5  # Fallback if conversion fails
+        else:
+            comp_retry_count = retry_count
+
+        filters = {
+            "docstatus": 1,
+            "custom_sent_to_digitax": 0,
+            "company": comp,
+            "custom_retry_count": ["<", comp_retry_count],
+        }
+        if invoice_name:
+            filters["name"] = invoice_name
+        if from_date and to_date:
+            filters["posting_date"] = ["between", [from_date, to_date]]
+
+        invoices = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
+        attempted += len(invoices)
+
+        for invoice in invoices:
+            try:
+                send_sales_invoice_to_digitax(invoice)
+            except Exception as e:
+                errors.append(f"{invoice}: {e}")
+
+    # Re-query rather than trust each call's return shape (send_sales_invoice_to_digitax
+    # returns different dict shapes for skip/error/success) — the field itself is the
+    # single source of truth for whether a send actually landed.
+    still_unsent = 0
+    if attempted:
+        filters = {"docstatus": 1, "custom_sent_to_digitax": 0}
+        filters["company"] = company if company else ["in", companies]
+        if invoice_name:
+            filters["name"] = invoice_name
+        still_unsent = frappe.db.count("Sales Invoice", filters)
+
+    return {
+        "attempted": attempted,
+        "sent": max(attempted - still_unsent, 0),
+        "still_unsent": still_unsent,
+        "errors": errors,
+    }
 
 @frappe.whitelist()
 def job_retry_sending_sales_invoices():
@@ -261,22 +288,25 @@ def job_retry_sending_sales_invoices():
             "reason": "Digitax sync is disabled in site configuration"
         }
     
-    # Get background job timeout from settings (ensure it's an int and positive)
-    digitax_settings = frappe.get_single("Digitax Settings")
-    try:
-        job_timeout = int(digitax_settings.get("background_job_timeout") or 600)
-        if job_timeout <= 0:
-            job_timeout = 600  # Fallback to default if invalid
-    except (ValueError, TypeError):
-        job_timeout = 600  # Fallback if conversion fails
-    
+    # Size the job for the slowest-configured enabled company, since this one job
+    # retries invoices across every company in a single sweep.
+    job_timeout = 600
+    for comp in get_enabled_digitax_companies():
+        settings = get_digitax_settings(comp)
+        try:
+            comp_timeout = int(settings.get("background_job_timeout") or 600)
+            if comp_timeout > job_timeout:
+                job_timeout = comp_timeout
+        except (ValueError, TypeError):
+            pass
+
     frappe.enqueue(
         retry_sending_sales_invoice_to_digitax,
         queue="default",
         timeout=job_timeout,
     )
 
-def fetch_sale_details_from_digitax(sale_id):
+def fetch_sale_details_from_digitax(sale_id, company):
     """
     Fetch full sale/credit note details from Digitax API using sale_id.
     Note: The same endpoint is used for both invoices and credit notes.
@@ -290,14 +320,14 @@ def fetch_sale_details_from_digitax(sale_id):
     logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
     
     try:
-        digitax_base_url, digitax_api_key = get_digitax_credentials()
+        digitax_base_url, digitax_api_key = get_digitax_credentials(company)
         
         if not digitax_base_url or not digitax_api_key:
             logger.error("Digitax credentials not configured")
             return None
         
-        # Get API timeout from settings (ensure it's an int and positive)
-        digitax_settings = frappe.get_single("Digitax Settings")
+        # Get API timeout from this company's settings (ensure it's an int and positive)
+        digitax_settings = get_digitax_settings(company)
         try:
             api_timeout = int(digitax_settings.get("api_request_timeout") or 30)
             if api_timeout <= 0:
@@ -367,7 +397,7 @@ def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger):
     
     if existing_sale_id:
         logger.info(f"Fetching full sale details for existing sale_id: {existing_sale_id}")
-        sale_details = fetch_sale_details_from_digitax(existing_sale_id)
+        sale_details = fetch_sale_details_from_digitax(existing_sale_id, doc.company)
         
         if sale_details:
             # Update all Digitax fields with fetched data (only if changed)
@@ -532,8 +562,8 @@ def _get_api_timeout(digitax_settings):
         return 30
 
 
-def _get_digitax_headers():
-    digitax_base_url, digitax_api_key = get_digitax_credentials()
+def _get_digitax_headers(company=None):
+    digitax_base_url, digitax_api_key = get_digitax_credentials(company)
     return digitax_base_url, {
         "accept": "application/json",
         "X-API-Key": digitax_api_key,
@@ -574,7 +604,7 @@ def _get_digitax_correction_date():
     return datetime.now(timezone.utc).date().isoformat()
 
 
-def _post_to_digitax(endpoint, payload, digitax_settings, logger=None):
+def _post_to_digitax(endpoint, payload, digitax_settings, logger=None, company=None):
     """
     Shared low-level HTTP POST to Digitax.
 
@@ -582,7 +612,7 @@ def _post_to_digitax(endpoint, payload, digitax_settings, logger=None):
     status_code == 0 signals a network/connection failure; all other values
     are real HTTP status codes from the Digitax server.
     """
-    digitax_base_url, headers = _get_digitax_headers()
+    digitax_base_url, headers = _get_digitax_headers(company)
     if not digitax_base_url:
         error = {"error": "configuration", "message": "Digitax Base URL is not configured."}
         if logger:
@@ -649,7 +679,7 @@ def _validate_virtual_amendment_user(digitax_settings):
     role = digitax_settings.get("virtual_amendment_role")
     if not role:
         frappe.throw(
-            _("Set Virtual Amendment Role in Digitax Settings before using virtual amendments."),
+            _("Set Virtual Amendment Role in this company's Digitax Company Settings before using virtual amendments."),
             title=_("Digitax Role Not Configured"),
         )
 
@@ -679,10 +709,9 @@ def _validate_virtual_amendment_invoice(doc):
 
 
 def _load_virtual_amendment_context(invoice_name):
-    digitax_settings = frappe.get_single("Digitax Settings")
-    _validate_virtual_amendment_user(digitax_settings)
-
     doc = frappe.get_doc("Sales Invoice", invoice_name)
+    digitax_settings = get_digitax_settings(doc.company)
+    _validate_virtual_amendment_user(digitax_settings)
     _validate_virtual_amendment_invoice(doc)
 
     return doc, digitax_settings
@@ -843,7 +872,7 @@ def _build_virtual_reversal_payload(doc, digitax_settings, state):
         "trader_invoice_number": state["next_reversal_trader_invoice_number"],
         "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=False)],
         "invoice_status_code": submitted_status,
-        "callback_url": get_digitax_callback_url_for_sales_with_items(),
+        "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "return_date": _get_digitax_correction_date(),
         "sale_id": state["active_sale_id"],
     }
@@ -862,7 +891,7 @@ def _build_virtual_sale_payload(doc, digitax_settings, state):
         "trader_invoice_number": state["next_sale_trader_invoice_number"],
         "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=True)],
         "invoice_status_code": submitted_status,
-        "callback_url": get_digitax_callback_url_for_sales_with_items(),
+        "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "sale_date": _get_digitax_correction_date(),
         "receipt_type_code": digitax_settings.get("default_receipt_type_code") or "S",
         "payment_type_code": digitax_settings.get("default_payment_type_code") or "01",
@@ -876,8 +905,10 @@ def _build_virtual_sale_payload(doc, digitax_settings, state):
     return payload
 
 
-def _post_virtual_amendment(url, payload, digitax_settings, logger):
-    response_data, status_code = _post_to_digitax(url, payload, digitax_settings, logger)
+def _post_virtual_amendment(url, payload, digitax_settings, logger, company=None):
+    response_data, status_code = _post_to_digitax(
+        url, payload, digitax_settings, logger, company=company
+    )
 
     if status_code == 0:
         logger.error(f"Digitax virtual amendment network failure: {response_data}")
@@ -886,7 +917,7 @@ def _post_virtual_amendment(url, payload, digitax_settings, logger):
     if status_code == 409 and "trader_invoice_number has already been used" in (response_data.get("message", "").lower()):
         existing_sale_id = (response_data.get("metadata") or {}).get("existing_sale_id", "")
         if existing_sale_id:
-            sale_details = fetch_sale_details_from_digitax(existing_sale_id)
+            sale_details = fetch_sale_details_from_digitax(existing_sale_id, company)
             if sale_details:
                 sale_details["already_exists"] = True
                 return sale_details, 200
@@ -1008,9 +1039,9 @@ def _build_virtual_sale_preview(doc, state, correction_reason):
 
 @frappe.whitelist()
 def get_digitax_virtual_amendment_status(invoice_name):
-    digitax_settings = frappe.get_single("Digitax Settings")
-    role = digitax_settings.get("virtual_amendment_role")
     doc = frappe.get_doc("Sales Invoice", invoice_name)
+    digitax_settings = get_digitax_settings(doc.company)
+    role = digitax_settings.get("virtual_amendment_role")
 
     can_create = bool(
         role
@@ -1075,7 +1106,9 @@ def send_virtual_digitax_reversal(invoice_name, correction_reason=None):
 
     payload = _build_virtual_reversal_payload(doc, digitax_settings, state)
     preview = _build_virtual_reversal_preview(doc, state, correction_reason)
-    response_data, status_code = _post_virtual_amendment("credit-notes-with-barcode", payload, digitax_settings, logger)
+    response_data, status_code = _post_virtual_amendment(
+        "credit-notes-with-barcode", payload, digitax_settings, logger, company=doc.company
+    )
     success = 200 <= status_code < 300
 
     row_data = {
@@ -1121,7 +1154,9 @@ def send_virtual_digitax_sale(invoice_name, correction_reason=None):
 
     payload = _build_virtual_sale_payload(doc, digitax_settings, state)
     preview = _build_virtual_sale_preview(doc, state, correction_reason)
-    response_data, status_code = _post_virtual_amendment("sales-with-items", payload, digitax_settings, logger)
+    response_data, status_code = _post_virtual_amendment(
+        "sales-with-items", payload, digitax_settings, logger, company=doc.company
+    )
     success = 200 <= status_code < 300
     customer_pin = resolve_digitax_customer_pin(doc)
 

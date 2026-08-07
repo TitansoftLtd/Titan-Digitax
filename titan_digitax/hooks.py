@@ -50,7 +50,9 @@ fixtures = [
 
 # include js in doctype views
 doctype_js = {
-    "Sales Invoice" : "public/js/sales_invoice.js"
+    "Sales Invoice" : "public/js/sales_invoice.js",
+    "Item": "public/js/item.js",
+    "Digitax Item": "public/js/digitax_item.js",
 }
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
@@ -150,7 +152,7 @@ jinja = {
 doc_events = {
 	"Sales Invoice": {
         "on_submit": "titan_digitax.titan_digitax.utils.sales_invoice.on_submit"
-    }
+    },
 }
 
 # Scheduled Tasks
@@ -159,7 +161,8 @@ doc_events = {
 scheduler_events = {
     "cron": {
         "0 * * * *": [
-            "titan_digitax.titan_digitax.utils.sales.job_retry_sending_sales_invoices"
+            "titan_digitax.titan_digitax.utils.sales.job_retry_sending_sales_invoices",
+            "titan_digitax.titan_digitax.doctype.digitax_sync_job.digitax_sync_job.digitax_sync_items_hourly",
         ]
     }
 	# "all": [
