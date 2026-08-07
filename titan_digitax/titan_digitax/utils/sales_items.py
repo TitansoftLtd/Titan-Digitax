@@ -138,6 +138,12 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 			}
 			if digitax_id:
 				entry["id"] = digitax_id
+			# item_bar_code is required by both DigiTax endpoints (sales-with-items and
+			# credit-notes-with-barcode — the latter's name says as much), so it's set
+			# unconditionally. The other fields below identify/register a brand new item
+			# and are only meaningful on the sales side; credit notes reference an
+			# already-registered item by id/barcode instead.
+			entry["item_bar_code"] = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
 			if not doc.is_return:
 				entry["item_name"] = display_name
 				entry["item_class_code"] = (
@@ -151,7 +157,6 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 					or "D"
 				)
 				entry["is_stockable"] = bool(digitax_settings.get("default_is_stockable"))
-				entry["item_bar_code"] = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
 			items_dict[display_name] = entry
 
 	if gate_failures:
