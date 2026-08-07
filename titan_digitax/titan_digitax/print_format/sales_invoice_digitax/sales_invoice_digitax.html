@@ -46,7 +46,10 @@
 
   <table class="sid-fees-table">
     <thead>
-      <tr><th colspan="2" class="sid-fees-header">Fees</th></tr>
+      <tr>
+        <th>Description</th>
+        <th class="sid-text-right">Amount</th>
+      </tr>
     </thead>
     <tbody>
       {% for item in ctx.fee_items %}
@@ -56,12 +59,20 @@
       </tr>
       {% endfor %}
     </tbody>
+    <tfoot>
+      <tr>
+        <td class="sid-total-label">Invoice Total</td>
+        <td class="sid-text-right sid-total-value">{{ ctx.formatted_invoice_total }}</td>
+      </tr>
+    </tfoot>
   </table>
 
-  <div class="sid-total-row">
-    <div class="sid-total-label">Invoice Total</div>
-    <div class="sid-total-value">{{ ctx.formatted_invoice_total }}</div>
+  {% if ctx.offline_url %}
+  <div class="sid-qr-section">
+    <img class="sid-qr-image" src="{{ get_qr_code_data_uri(ctx.offline_url) }}" alt="Digitax verification QR code" />
+    <div class="sid-qr-label">Scan to verify eTIMS receipt</div>
   </div>
+  {% endif %}
 
   <table class="sid-footer">
     <tr>

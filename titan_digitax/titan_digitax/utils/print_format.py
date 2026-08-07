@@ -429,9 +429,11 @@ def get_school_invoice_print_context(doc):
 
 	customer_code = frappe.db.get_value("Customer", doc.customer, "customer_code") or ""
 	reference_no = getattr(doc, "custom_engage_invoice_number", None) or doc.name
+	digitax_details = get_active_digitax_details(doc)
 
 	return {
 		"document_title": "Credit Note" if doc.is_return else "Invoice",
+		"offline_url": (digitax_details or {}).get("offline_url") or "",
 		"company": company,
 		"reference_no": reference_no,
 		"posting_date": doc.posting_date,
