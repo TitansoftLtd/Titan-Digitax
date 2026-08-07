@@ -59,13 +59,12 @@
       </tr>
       {% endfor %}
     </tbody>
-    <tfoot>
-      <tr>
-        <td class="sid-total-label">Invoice Total</td>
-        <td class="sid-text-right sid-total-value">{{ ctx.formatted_invoice_total }}</td>
-      </tr>
-    </tfoot>
   </table>
+
+  <div class="sid-total-row">
+    <span class="sid-total-label">Invoice Total</span>
+    <span class="sid-total-value">{{ ctx.formatted_invoice_total }}</span>
+  </div>
 
   {% if ctx.offline_url %}
   <div class="sid-qr-section">
