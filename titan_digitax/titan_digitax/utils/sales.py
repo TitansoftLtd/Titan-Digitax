@@ -47,6 +47,76 @@ RETRY_SWEEP_STALE_MINUTES = 90
 # of a full hour so the next cron firing doesn't overlap it.
 RETRY_SWEEP_MAX_DURATION_MINUTES = 50
 
+# A virtual reversal blanks custom_sale_id and sets custom_digitax_status to
+# "Awaiting Corrected Virtual Sale", expecting the corrected virtual sale to
+# follow immediately. No progress on that for this long is treated as stuck.
+STUCK_AWAITING_SALE_GRACE_MINUTES = 120
+
+# Written to custom_error_message when a stuck reversal is flagged - doubles as
+# the dedup marker so the check doesn't raise a fresh Actionable Item every hour
+# for the same still-stuck invoice.
+STUCK_AWAITING_SALE_MARKER = "Digitax virtual reversal stuck awaiting corrected sale"
+
+
+def _check_stuck_awaiting_corrected_sales():
+    """custom_sent_to_digitax stays 1 through the "awaiting corrected sale" state
+    (see _mark_invoice_awaiting_corrected_sale), which is exactly the field both
+    the retry sweep and the Failed Digitax Invoices report require to be 0 - so
+    an invoice stuck here after a reversal, with no corrected sale ever sent, is
+    invisible to every other monitoring mechanism. KRA holds a full reversal
+    (net zero) while ERPNext still shows the invoice as sent. Runs alongside the
+    hourly retry sweep rather than as its own scheduled job.
+    """
+    stuck_invoices = frappe.get_all(
+        "Sales Invoice",
+        filters={"docstatus": 1, "custom_digitax_status": "Awaiting Corrected Virtual Sale"},
+        fields=["name", "custom_error_message"],
+    )
+
+    for row in stuck_invoices:
+        if row.custom_error_message and STUCK_AWAITING_SALE_MARKER in row.custom_error_message:
+            continue  # already flagged - don't spam a fresh Actionable Item every hour
+
+        last_reversal = frappe.db.get_value(
+            "Digitax Amendment Row",
+            {
+                "parent": row.name,
+                "parenttype": "Sales Invoice",
+                "amendment_type": "Virtual Credit Note",
+                "status": "Sent",
+            },
+            "sent_on",
+            order_by="sent_on desc",
+        )
+        if not last_reversal:
+            continue  # nothing to measure the wait against - shouldn't happen in practice
+
+        stuck_minutes = (now_datetime() - frappe.utils.get_datetime(last_reversal)).total_seconds() / 60
+        if stuck_minutes < STUCK_AWAITING_SALE_GRACE_MINUTES:
+            continue
+
+        hours, minutes = divmod(int(stuck_minutes), 60)
+        error_msg = f"{STUCK_AWAITING_SALE_MARKER} for over {hours}h {minutes}m."
+        frappe.db.set_value("Sales Invoice", row.name, "custom_error_message", error_msg, update_modified=False)
+        create_actionable_item(
+            title=f"Digitax Reversal Stuck Awaiting Corrected Sale: {row.name}",
+            item_type="Digitax Amendment Stuck",
+            description=(
+                f"<p><strong>Sales Invoice:</strong> {row.name} had a virtual reversal sent "
+                f"{last_reversal}, but no corrected virtual sale has followed since.</p>"
+                f"<p>KRA holds a full reversal (net zero) for this invoice, but ERPNext still "
+                f"shows it as sent (custom_sent_to_digitax=1) with no active Digitax sale ID. "
+                f"Neither the hourly retry sweep nor the Failed Digitax Invoices report will "
+                f"surface this on their own, since both require custom_sent_to_digitax=0.</p>"
+            ),
+            action_required="Send the corrected virtual sale for this invoice, or resolve manually if the reversal was intentional",
+            reference_doctype="Sales Invoice",
+            reference_name=row.name,
+            priority="High",
+        )
+
+    frappe.db.commit()
+
 
 def _get_retry_sweep_state():
     return frappe.cache().get_value(RETRY_SWEEP_CACHE_KEY)
@@ -562,6 +632,11 @@ def job_retry_sending_sales_invoices():
             "skipped": True,
             "reason": "Digitax sync is disabled in site configuration"
         }
+
+    # Independent of whether a sweep actually starts below (it may be skipped if
+    # a previous one is still running) - a stuck reversal isn't affected by that
+    # either way, so check every time this fires.
+    _check_stuck_awaiting_corrected_sales()
 
     existing_state = _get_retry_sweep_state()
     if existing_state:
