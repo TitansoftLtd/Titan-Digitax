@@ -1251,6 +1251,17 @@ def validate_credit_note_against_active_amendments(doc, method=None):
 
 
 def _load_virtual_amendment_context(invoice_name):
+    # Row-level lock (SELECT ... FOR UPDATE), held for the rest of this request/
+    # job until it commits or rolls back. _throw_if_sent_trader_exists only
+    # catches a double-send if the first attempt's amendment row was already
+    # recorded by the time the second one checks - without a lock, two
+    # near-simultaneous clicks (double-click, two tabs, a slow retry) can both
+    # pass that check before either has recorded anything, and both then POST
+    # the same trader_invoice_number to Digitax independently. A second
+    # concurrent request for the SAME invoice now blocks here until the first
+    # finishes, then correctly sees the just-recorded Sent row and throws.
+    frappe.db.get_value("Sales Invoice", invoice_name, "name", for_update=True)
+
     doc = frappe.get_doc("Sales Invoice", invoice_name)
     digitax_settings = get_digitax_settings(doc.company)
     _validate_virtual_amendment_user(digitax_settings)
