@@ -11,6 +11,16 @@ from .company_config import (
     get_digitax_settings,
 )
 from .sales_items import build_digitax_items_payload
+from .actionable import create_actionable_item
+
+# The exact wording Digitax uses today for "this trader_invoice_number was already
+# filed" on a 409 response. Duplicate-send recovery (skip re-filing, fetch and adopt
+# the existing sale instead of erroring) is keyed off BOTH the 409 status AND this
+# text matching - status alone isn't a safe signal, since 409 could mean a different
+# kind of conflict. If Digitax ever rewords this, matches will silently stop, which
+# is exactly why an unmatched 409 raises a distinct, loud Actionable Item below
+# instead of being treated as a routine send failure.
+DUPLICATE_TRADER_INVOICE_MESSAGE = "trader_invoice_number has already been used"
 
 
 @frappe.whitelist()
@@ -176,9 +186,10 @@ def send_sales_invoice_to_digitax(docname):
         )
         logger.info(f"Invoice fields updated in ERPNext")
     elif status_code == 409:
-        error_message = response_data.get("message", "").lower()
-        logger.info(f"409 Conflict received. Message: {response_data.get('message', '')}")
-        is_duplicate = "trader_invoice_number has already been used" in error_message
+        raw_message = response_data.get("message", "")
+        error_message = raw_message.lower()
+        logger.info(f"409 Conflict received. Message: {raw_message}")
+        is_duplicate = DUPLICATE_TRADER_INVOICE_MESSAGE in error_message
 
         if is_duplicate:
             logger.info(f"DUPLICATE DETECTED: Invoice already exists in Digitax (409)")
@@ -188,15 +199,45 @@ def send_sales_invoice_to_digitax(docname):
             logger.info(f"Existing Sale ID: {existing_sale_id}, Trader Invoice Number: {trader_invoice_number}")
             response_data = update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger)
         else:
-            logger.error(f"409 Conflict (NOT duplicate): {response_data.get('message', 'Unknown conflict')}")
+            # A 409 we can't positively identify as "trader_invoice_number already
+            # used". It's treated as a normal send failure (error saved, retried on
+            # the usual hourly cadence up to this company's max_retry_attempts) - but
+            # unlike other failures, it's also raised as its own loud Actionable Item.
+            # A 409 on this endpoint has really only ever meant one thing, so this is
+            # most likely Digitax having reworded that exact message; someone needs to
+            # confirm that against the raw response below and update
+            # DUPLICATE_TRADER_INVOICE_MESSAGE accordingly - silently falling back to
+            # "just another error" would let this go unnoticed indefinitely.
+            logger.error(f"409 Conflict (unrecognized message): {raw_message or 'Unknown conflict'}")
             frappe.db.set_value(
                 "Sales Invoice",
                 doc.name,
                 "custom_error_message",
-                response_data.get("message", "Conflict error (409)"),
+                raw_message or "Conflict error (409)",
                 update_modified=False,
             )
-            logger.info(f"Error message saved to invoice")
+            create_actionable_item(
+                title=f"Unrecognized Digitax 409 Conflict: {doc.name}",
+                item_type="Digitax Conflict Not Recognized",
+                description=(
+                    f"<p><strong>Sales Invoice:</strong> {doc.name} got a 409 Conflict from "
+                    f"Digitax whose message did not match the known "
+                    f"\"{DUPLICATE_TRADER_INVOICE_MESSAGE}\" wording.</p>"
+                    f"<p><strong>Raw message:</strong> {raw_message or '(empty)'}</p>"
+                    f"<p>This has so far always meant the trader invoice number was already "
+                    f"filed - if that's still true here, Digitax likely changed the wording "
+                    f"and <code>DUPLICATE_TRADER_INVOICE_MESSAGE</code> in "
+                    f"<code>titan_digitax/utils/sales.py</code> needs updating to match, or "
+                    f"duplicate sends will keep failing to be recognized. The invoice will "
+                    f"keep retrying hourly up to the configured retry limit in the meantime.</p>"
+                ),
+                action_required="Check the raw 409 message above against Digitax's current API docs/behaviour and update the code if the wording changed",
+                reference_doctype="Sales Invoice",
+                reference_name=doc.name,
+                related_data=frappe.as_json({"status_code": status_code, "response": response_data}),
+                priority="High",
+            )
+            logger.info(f"Error message saved to invoice; Actionable Item raised")
     else:
         error_msg = response_data.get("message", "Unknown error")
         logger.error(f"API ERROR: Status {status_code}, Message: {error_msg}")
@@ -964,7 +1005,7 @@ def _post_virtual_amendment(url, payload, digitax_settings, logger, company=None
         logger.error(f"Digitax virtual amendment network failure: {response_data}")
         return response_data, 0
 
-    if status_code == 409 and "trader_invoice_number has already been used" in (response_data.get("message", "").lower()):
+    if status_code == 409 and DUPLICATE_TRADER_INVOICE_MESSAGE in (response_data.get("message", "").lower()):
         existing_sale_id = (response_data.get("metadata") or {}).get("existing_sale_id", "")
         if existing_sale_id:
             sale_details = fetch_sale_details_from_digitax(existing_sale_id, company)
