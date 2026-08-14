@@ -3,7 +3,7 @@ import json
 import requests
 from datetime import datetime, timezone
 from frappe import _
-from frappe.utils import now_datetime
+from frappe.utils import now_datetime, add_to_date
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
 from .company_config import (
     is_digitax_enabled_for_company,
@@ -21,6 +21,125 @@ from .actionable import create_actionable_item
 # is exactly why an unmatched 409 raises a distinct, loud Actionable Item below
 # instead of being treated as a routine send failure.
 DUPLICATE_TRADER_INVOICE_MESSAGE = "trader_invoice_number has already been used"
+
+# How many unsent invoices a single company gets retried per hourly sweep, when
+# Digitax Company Settings.retry_batch_size isn't set. At a typical ~5s per send,
+# 100 invoices takes roughly 8 minutes; a large backlog drains gradually over
+# multiple hourly runs instead of one sweep trying to process everything at once.
+DEFAULT_RETRY_BATCH_SIZE = 100
+
+# Cache key tracking the currently-running (if any) hourly retry sweep, so a slow
+# sweep can't have a second one start on top of it, and so a sweep that's stopped
+# making progress can be detected and recovered from automatically.
+RETRY_SWEEP_CACHE_KEY = "titan_digitax:retry_sweep_state"
+
+# No per-invoice progress for this long is treated as "the sweep is stuck", not
+# "the sweep is just working through a large batch" - self-heals by letting the
+# next hourly cron start a fresh sweep instead of staying blocked forever.
+RETRY_SWEEP_STALE_MINUTES = 90
+
+# The full (unscoped) hourly sweep keeps pulling and processing further batches -
+# across all companies, lowest retry count first - rather than stopping after one
+# batch, so a large backlog (e.g. a burst upload) drains as fast as Digitax allows
+# within the hour instead of trickling out one small batch per hour. Capped short
+# of a full hour so the next cron firing doesn't overlap it.
+RETRY_SWEEP_MAX_DURATION_MINUTES = 50
+
+
+def _get_retry_sweep_state():
+    return frappe.cache().get_value(RETRY_SWEEP_CACHE_KEY)
+
+
+def _set_retry_sweep_state(state):
+    frappe.cache().set_value(RETRY_SWEEP_CACHE_KEY, state)
+
+
+def _clear_retry_sweep_state():
+    frappe.cache().delete_value(RETRY_SWEEP_CACHE_KEY)
+
+
+def _touch_retry_sweep_progress():
+    """Record that the running sweep just processed an invoice. A no-op when no
+    sweep state is tracked (e.g. a manual/targeted retry call outside the hourly
+    job) - only the hourly sweep's own state is ever present to update.
+    """
+    state = _get_retry_sweep_state()
+    if not state:
+        return
+    state["last_progress_at"] = now_datetime().isoformat()
+    state["processed"] = (state.get("processed") or 0) + 1
+    _set_retry_sweep_state(state)
+
+
+def _retry_sweep_is_stale(state):
+    last_progress_at = state.get("last_progress_at")
+    if not last_progress_at:
+        return True
+    try:
+        elapsed_minutes = (now_datetime() - frappe.utils.get_datetime(last_progress_at)).total_seconds() / 60
+    except Exception:
+        return True
+    return elapsed_minutes > RETRY_SWEEP_STALE_MINUTES
+
+
+def _write_digitax_response_fields(doc_name, field_mapping, logger, item_title, description_intro):
+    """Write Digitax response fields onto a Sales Invoice one at a time.
+
+    Digitax has already accepted the sale by the time this runs, so a field
+    write failing locally (most likely a response value - e.g. a receipt URL -
+    longer than a Data field's 140-char limit) must never be treated as the send
+    itself having failed, and must never abort the other fields from being
+    saved. Writing one field at a time (rather than one dict-based UPDATE
+    covering all of them) means one oversized value can't block the rest.
+
+    Any failures are recorded as a single Actionable Item rather than raised,
+    since raising here (this runs inside a background job per the async submit
+    path) would otherwise just be a silently failed job with the invoice left
+    stuck: sent at Digitax, but never marked so locally, so every retry would
+    hit the exact same write failure again on the exact same oversized value.
+
+    Returns {field: (value, error)} for any fields that failed - empty if all
+    of them wrote successfully.
+    """
+    failed = {}
+    for field, value in field_mapping.items():
+        try:
+            frappe.db.set_value("Sales Invoice", doc_name, field, value, update_modified=False)
+        except Exception as e:
+            logger.error(f"Failed to save Digitax field {field} on {doc_name}: {e}")
+            failed[field] = (value, str(e))
+
+    if failed:
+        details = "".join(
+            f"<li><strong>{f}</strong>: {err} (value: {str(v)[:200]!r})</li>"
+            for f, (v, err) in failed.items()
+        )
+        frappe.db.set_value(
+            "Sales Invoice",
+            doc_name,
+            "custom_error_message",
+            f"Digitax accepted this sale, but {len(failed)} field(s) of the response could not "
+            f"be saved locally - see the Actionable Item for detail.",
+            update_modified=False,
+        )
+        create_actionable_item(
+            title=item_title,
+            item_type="Digitax Field Write Failed",
+            description=(
+                f"<p>{description_intro}</p>"
+                f"<ul>{details}</ul>"
+                f"<p>The sale is already filed at Digitax/KRA regardless of this. Widen the "
+                f"affected Sales Invoice custom field(s) - they're likely too short for the "
+                f"value Digitax returned - then resolve so this data can be saved.</p>"
+            ),
+            action_required="Widen the affected Sales Invoice custom field(s) so the Digitax response can be saved",
+            reference_doctype="Sales Invoice",
+            reference_name=doc_name,
+            related_data=frappe.as_json({f: str(v) for f, (v, err) in failed.items()}),
+            priority="High",
+        )
+
+    return failed
 
 
 @frappe.whitelist()
@@ -166,25 +285,32 @@ def send_sales_invoice_to_digitax(docname):
         logger.info(f"SUCCESS: Invoice sent successfully to Digitax")
         logger.info(f"Sale ID: {response_data.get('id')}, Status: {response_data.get('status')}")
 
-        frappe.db.set_value(
-            "Sales Invoice",
+        failed_fields = _write_digitax_response_fields(
             doc.name,
             {
+                "custom_sent_to_digitax": 1,
+                "custom_sale_id": response_data.get("id", ""),
                 "custom_offline_url": response_data.get("offline_url", ""),
                 "custom_sale_detail_url": response_data.get("sale_detail_url", ""),
                 "custom_serial_number": response_data.get("serial_number", ""),
                 "custom_invoice_number": response_data.get("invoice_number", ""),
                 "custom_digitax_status": response_data.get("status", ""),
-                "custom_sale_id": response_data.get("id", ""),
                 "custom_date": response_data.get("date", ""),
                 "custom_time": response_data.get("time", ""),
                 "custom_receipt_type_code": response_data.get("receipt_type_code", ""),
                 "custom_original_sale_id": response_data.get("original_sale_id", ""),
-                "custom_sent_to_digitax": 1,
             },
-            update_modified=False,
+            logger,
+            item_title=f"Digitax Response Too Long To Save: {doc.name}",
+            description_intro=(
+                f"<strong>Sales Invoice:</strong> {doc.name} was successfully sent to Digitax "
+                f"(sale accepted), but part of the response could not be saved locally."
+            ),
         )
-        logger.info(f"Invoice fields updated in ERPNext")
+        logger.info(
+            f"Invoice fields updated in ERPNext"
+            + (f" - {len(failed_fields)} field(s) failed to save, see Actionable Item" if failed_fields else "")
+        )
     elif status_code == 409:
         raw_message = response_data.get("message", "")
         error_message = raw_message.lower()
@@ -264,45 +390,109 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
     attempted = 0
     errors = []
 
-    for comp in companies:
-        if not is_digitax_enabled_for_company(comp):
-            continue
+    # Invoices already attempted THIS run, across every batch/round/company -
+    # excluded from every subsequent query so nothing is attempted twice within
+    # the same sweep, even if it's still eligible by retry_count. A fresh burst of
+    # unsent invoices deserves a first attempt each before any of them gets a
+    # second - that's what keeps one systemically-failing batch from burning
+    # through its whole retry budget in a single hour instead of spreading
+    # attempts across separate hourly sweeps.
+    attempted_this_run = set()
 
-        settings = get_digitax_settings(comp)
-        target_country = settings.get("target_country") or "Kenya"
-        company_country = frappe.db.get_value("Company", comp, "country")
-        if company_country != target_country:
-            continue
+    # Only the real unscoped hourly sweep (no targeting args at all) keeps looping
+    # for more batches once the first round is done - a manual/targeted call
+    # (specific invoice, company, or date range) does exactly what was asked and
+    # returns, it was never meant to run for up to an hour.
+    is_full_sweep = not any([invoice_name, company, from_date, to_date])
+    sweep_deadline = (
+        add_to_date(now_datetime(), minutes=RETRY_SWEEP_MAX_DURATION_MINUTES) if is_full_sweep else None
+    )
 
-        if retry_count is None:
-            try:
-                comp_retry_count = int(settings.get("max_retry_attempts") or 5)
-                if comp_retry_count <= 0:
-                    comp_retry_count = 5  # Fallback to default if invalid
-            except (ValueError, TypeError):
-                comp_retry_count = 5  # Fallback if conversion fails
-        else:
-            comp_retry_count = retry_count
+    # This function is what the hourly sweep's tracked job actually runs. Whether
+    # it finishes cleanly or something below raises past the per-invoice
+    # try/except, the tracked sweep is over either way - clear it in a finally so
+    # the next hourly run doesn't wait out the staleness window unnecessarily.
+    try:
+        while True:
+            found_any_this_round = False
 
-        filters = {
-            "docstatus": 1,
-            "custom_sent_to_digitax": 0,
-            "company": comp,
-            "custom_retry_count": ["<", comp_retry_count],
-        }
-        if invoice_name:
-            filters["name"] = invoice_name
-        if from_date and to_date:
-            filters["posting_date"] = ["between", [from_date, to_date]]
+            for comp in companies:
+                if not is_digitax_enabled_for_company(comp):
+                    continue
 
-        invoices = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
-        attempted += len(invoices)
+                settings = get_digitax_settings(comp)
+                target_country = settings.get("target_country") or "Kenya"
+                company_country = frappe.db.get_value("Company", comp, "country")
+                if company_country != target_country:
+                    continue
 
-        for invoice in invoices:
-            try:
-                send_sales_invoice_to_digitax(invoice)
-            except Exception as e:
-                errors.append(f"{invoice}: {e}")
+                if retry_count is None:
+                    try:
+                        comp_retry_count = int(settings.get("max_retry_attempts") or 5)
+                        if comp_retry_count <= 0:
+                            comp_retry_count = 5  # Fallback to default if invalid
+                    except (ValueError, TypeError):
+                        comp_retry_count = 5  # Fallback if conversion fails
+                else:
+                    comp_retry_count = retry_count
+
+                try:
+                    comp_batch_size = int(settings.get("retry_batch_size") or DEFAULT_RETRY_BATCH_SIZE)
+                    if comp_batch_size <= 0:
+                        comp_batch_size = DEFAULT_RETRY_BATCH_SIZE
+                except (ValueError, TypeError):
+                    comp_batch_size = DEFAULT_RETRY_BATCH_SIZE
+
+                filters = {
+                    "docstatus": 1,
+                    "custom_sent_to_digitax": 0,
+                    "company": comp,
+                    "custom_retry_count": ["<", comp_retry_count],
+                }
+                if from_date and to_date:
+                    filters["posting_date"] = ["between", [from_date, to_date]]
+                if invoice_name:
+                    # A specific target always wins - never widened into an
+                    # exclusion-list search, regardless of what's been attempted
+                    # elsewhere this run.
+                    filters["name"] = invoice_name
+                elif attempted_this_run:
+                    filters["name"] = ["not in", list(attempted_this_run)]
+
+                # Lowest retry count first (spread attempts across the backlog
+                # rather than hammering the same invoices), oldest posting date
+                # as the tiebreaker, capped per company per round.
+                invoices = frappe.get_all(
+                    "Sales Invoice",
+                    filters=filters,
+                    pluck="name",
+                    order_by="custom_retry_count asc, posting_date asc",
+                    limit_page_length=comp_batch_size,
+                )
+                if invoices:
+                    found_any_this_round = True
+
+                attempted += len(invoices)
+                attempted_this_run.update(invoices)
+
+                for invoice in invoices:
+                    try:
+                        send_sales_invoice_to_digitax(invoice)
+                    except Exception as e:
+                        errors.append(f"{invoice}: {e}")
+                    finally:
+                        _touch_retry_sweep_progress()
+
+            if not is_full_sweep:
+                break  # targeted call - exactly one pass, as before
+
+            if not found_any_this_round:
+                break  # nothing left to attempt this sweep
+
+            if sweep_deadline and now_datetime() >= sweep_deadline:
+                break  # time budget used up - whatever's left is picked up next hour
+    finally:
+        _clear_retry_sweep_state()
 
     # Re-query rather than trust each call's return shape (send_sales_invoice_to_digitax
     # returns different dict shapes for skip/error/success) — the field itself is the
@@ -330,10 +520,54 @@ def job_retry_sending_sales_invoices():
             "skipped": True,
             "reason": "Digitax sync is disabled in site configuration"
         }
-    
-    # Size the job for the slowest-configured enabled company, since this one job
-    # retries invoices across every company in a single sweep.
-    job_timeout = 600
+
+    existing_state = _get_retry_sweep_state()
+    if existing_state:
+        if not _retry_sweep_is_stale(existing_state):
+            # A previous sweep is still making progress - don't start a second one
+            # on top of it (two sweeps could both pick up and resend the same
+            # invoice concurrently). It'll get picked up again next hour if it's
+            # still unsent by then.
+            frappe.logger("digitax_integration").info(
+                f"Skipping retry sweep - previous sweep (job {existing_state.get('job_id')}) "
+                f"still in progress, {existing_state.get('processed', 0)} invoice(s) processed so far."
+            )
+            return {"skipped": True, "reason": "A previous retry sweep is still in progress"}
+
+        # No progress in over RETRY_SWEEP_STALE_MINUTES - the previous sweep is
+        # presumed stuck (hung request, crashed worker that never reached the
+        # finally block, etc). Flag it for a human to check, and self-heal by
+        # clearing the state so this run isn't blocked waiting on a job that may
+        # never finish.
+        frappe.logger("digitax_integration").warning(
+            f"Previous Digitax retry sweep (job {existing_state.get('job_id')}) appears stuck - "
+            f"no progress in over {RETRY_SWEEP_STALE_MINUTES} minutes. Starting a fresh sweep."
+        )
+        create_actionable_item(
+            title="Digitax Retry Sweep Appears Stuck",
+            item_type="Digitax Sweep Stalled",
+            description=(
+                f"<p>The hourly Digitax retry sweep (background job "
+                f"<code>{existing_state.get('job_id')}</code>, started "
+                f"{existing_state.get('started_at')}) has not made progress in over "
+                f"{RETRY_SWEEP_STALE_MINUTES} minutes - {existing_state.get('processed', 0)} "
+                f"invoice(s) were processed before it stalled.</p>"
+                f"<p>A new sweep has been started automatically so retries aren't blocked "
+                f"indefinitely. If the old job is still actually running (check Background "
+                f"Jobs in Desk), stop it manually to free up worker capacity - calling "
+                f"<code>stop_digitax_retry_sweep</code> does this for you.</p>"
+            ),
+            action_required="Check Background Jobs for the stuck job and stop it if it's still running",
+            priority="High",
+        )
+        _clear_retry_sweep_state()
+
+    # This job now keeps looping for further batches for up to
+    # RETRY_SWEEP_MAX_DURATION_MINUTES, so its own hard timeout must cover that
+    # whole span (plus a wrap-up margin) - not just one company's configured
+    # per-batch timeout. Still take the max against any company's
+    # background_job_timeout in case it's deliberately set higher than that.
+    job_timeout = RETRY_SWEEP_MAX_DURATION_MINUTES * 60 + 300
     for comp in get_enabled_digitax_companies():
         settings = get_digitax_settings(comp)
         try:
@@ -343,11 +577,55 @@ def job_retry_sending_sales_invoices():
         except (ValueError, TypeError):
             pass
 
-    frappe.enqueue(
+    job = frappe.enqueue(
         retry_sending_sales_invoice_to_digitax,
         queue="default",
         timeout=job_timeout,
     )
+
+    job_id = getattr(job, "id", None)
+    _set_retry_sweep_state({
+        "job_id": job_id,
+        "started_at": now_datetime().isoformat(),
+        "last_progress_at": now_datetime().isoformat(),
+        "processed": 0,
+    })
+
+    return {"enqueued": True, "job_id": job_id}
+
+
+@frappe.whitelist()
+def stop_digitax_retry_sweep():
+    """Manually stop a running Digitax retry sweep and immediately free it up for
+    the next hourly run, instead of waiting out the staleness timeout. Restricted
+    to System Manager since it can send a stop signal to a background job.
+    """
+    frappe.only_for("System Manager")
+
+    state = _get_retry_sweep_state()
+    if not state:
+        return {"stopped": False, "message": "No retry sweep is currently tracked as running."}
+
+    job_id = state.get("job_id")
+    stop_result = "not attempted (no job id was recorded)"
+    if job_id:
+        try:
+            from frappe.core.doctype.rq_job.rq_job import stop_job
+
+            stop_job(job_id)
+            stop_result = "stop signal sent"
+        except Exception as e:
+            stop_result = f"failed to send stop signal: {e}"
+
+    _clear_retry_sweep_state()
+    return {
+        "stopped": True,
+        "job_id": job_id,
+        "stop_result": stop_result,
+        "message": "Sweep state cleared - the next hourly run will start a fresh sweep regardless "
+        "of whether the stop signal actually reached a running job.",
+    }
+
 
 def fetch_sale_details_from_digitax(sale_id, company):
     """
@@ -508,19 +786,6 @@ def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger, exp
     """
     response_data = {}
 
-    # Helper function to update field only if value changed
-    def update_field_if_changed(doctype, docname, fieldname, new_value):
-        current_value = frappe.db.get_value(doctype, docname, fieldname)
-        # Convert None to empty string for comparison
-        current_value = current_value if current_value is not None else ""
-        new_value = new_value if new_value is not None else ""
-        
-        # Only update if values are different
-        if str(current_value) != str(new_value):
-            frappe.db.set_value(doctype, docname, fieldname, new_value, update_modified=False)
-            return True
-        return False
-    
     if existing_sale_id:
         logger.info(f"Fetching full sale details for existing sale_id: {existing_sale_id}")
         sale_details = fetch_sale_details_from_digitax(existing_sale_id, doc.company)
@@ -535,37 +800,38 @@ def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger, exp
                     details="<ul>" + "".join(f"<li>{m}</li>" for m in mismatches) + "</ul>",
                 )
 
-            # Update all Digitax fields with fetched data (only if changed)
+            # Update all Digitax fields with fetched data
             logger.info(f"Checking and updating invoice fields with Digitax details")
 
-            updated_fields = []
-            
-            # Map of field names to values from Digitax
-            field_mapping = {
-                "custom_offline_url": sale_details.get("offline_url", ""),
-                "custom_sale_detail_url": sale_details.get("sale_detail_url", ""),
-                "custom_serial_number": sale_details.get("serial_number", ""),
-                "custom_invoice_number": sale_details.get("invoice_number", ""),
-                "custom_digitax_status": sale_details.get("status", ""),
-                "custom_sale_id": sale_details.get("id", ""),
-                "custom_date": sale_details.get("date", ""),
-                "custom_time": sale_details.get("time", ""),
-                "custom_receipt_type_code": sale_details.get("receipt_type_code", ""),
-                "custom_original_sale_id": sale_details.get("original_sale_id", ""),
-                "custom_sent_to_digitax": 1,
-                "custom_error_message": "",
-            }
-            
-            # Update each field only if value changed
-            for field, value in field_mapping.items():
-                if update_field_if_changed("Sales Invoice", doc.name, field, value):
-                    updated_fields.append(field)
-            
-            if updated_fields:
-                logger.info(f"Updated fields: {', '.join(updated_fields)}")
+            failed_fields = _write_digitax_response_fields(
+                doc.name,
+                {
+                    "custom_sent_to_digitax": 1,
+                    "custom_sale_id": sale_details.get("id", ""),
+                    "custom_offline_url": sale_details.get("offline_url", ""),
+                    "custom_sale_detail_url": sale_details.get("sale_detail_url", ""),
+                    "custom_serial_number": sale_details.get("serial_number", ""),
+                    "custom_invoice_number": sale_details.get("invoice_number", ""),
+                    "custom_digitax_status": sale_details.get("status", ""),
+                    "custom_date": sale_details.get("date", ""),
+                    "custom_time": sale_details.get("time", ""),
+                    "custom_receipt_type_code": sale_details.get("receipt_type_code", ""),
+                    "custom_original_sale_id": sale_details.get("original_sale_id", ""),
+                    "custom_error_message": "",
+                },
+                logger,
+                item_title=f"Digitax Response Too Long To Save: {doc.name}",
+                description_intro=(
+                    f"<strong>Sales Invoice:</strong> {doc.name} matched a duplicate sale already "
+                    f"filed at Digitax (verified), but part of the response could not be saved "
+                    f"locally."
+                ),
+            )
+            if failed_fields:
+                logger.info(f"{len(failed_fields)} field(s) failed to save, see Actionable Item")
             else:
-                logger.info(f"All fields already up to date, no changes needed")
-            
+                logger.info(f"All fields updated")
+
             # Update response_data with fetched details
             response_data = sale_details.copy()
             response_data["success"] = True

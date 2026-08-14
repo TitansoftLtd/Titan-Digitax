@@ -19,6 +19,7 @@
   "target_country",
   "api_request_timeout",
   "max_retry_attempts",
+  "retry_batch_size",
   "background_job_timeout",
   "item_sync_overrides_section",
   "require_digitax_item_name",
@@ -158,6 +159,13 @@
    "fieldname": "max_retry_attempts",
    "fieldtype": "Int",
    "label": "Max Retry Attempts"
+  },
+  {
+   "default": "100",
+   "description": "Max unsent invoices for this company retried in a single hourly sweep, oldest first (default: 100). At a typical ~5s per send, 100 invoices takes roughly 8 minutes; worst case (every invoice hitting the full API Request Timeout) it's bounded by that timeout x this number, shared across all companies within Background Job Timeout. A large backlog drains gradually over multiple hourly runs rather than one sweep trying to process everything at once.",
+   "fieldname": "retry_batch_size",
+   "fieldtype": "Int",
+   "label": "Retry Batch Size"
   },
   {
    "default": "600",
