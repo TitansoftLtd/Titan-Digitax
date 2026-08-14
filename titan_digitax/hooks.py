@@ -152,6 +152,7 @@ jinja = {
 
 doc_events = {
 	"Sales Invoice": {
+        "validate": "titan_digitax.titan_digitax.utils.sales_invoice.validate",
         "on_submit": "titan_digitax.titan_digitax.utils.sales_invoice.on_submit",
         "on_cancel": "titan_digitax.titan_digitax.utils.sales_invoice.on_cancel"
     },

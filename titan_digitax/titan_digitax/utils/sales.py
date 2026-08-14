@@ -707,6 +707,56 @@ def _validate_virtual_amendment_invoice(doc):
     if not doc.custom_sent_to_digitax and not doc.custom_sale_id:
         frappe.throw(_("This Sales Invoice has not been sent to Digitax yet."))
 
+    existing_credit_note = frappe.db.get_value(
+        "Sales Invoice",
+        {"is_return": 1, "return_against": doc.name, "docstatus": 1},
+        "name",
+    )
+    if existing_credit_note:
+        frappe.throw(
+            _(
+                "A Credit Note ({0}) already exists against this invoice. Virtual amendments and "
+                "Credit Notes both correct a filed sale - use one or the other, not both."
+            ).format(frappe.bold(existing_credit_note))
+        )
+
+
+def has_active_virtual_amendments(invoice_name):
+    """True when a Sent Virtual Sale/Virtual Credit Note row exists against this
+    invoice - i.e. a virtual amendment flow has already been started for it.
+    The "Original Sale" row is excluded: it just records the initial filing, it
+    isn't itself an amendment.
+    """
+    return bool(
+        frappe.db.exists(
+            "Digitax Amendment Row",
+            {
+                "parent": invoice_name,
+                "parenttype": "Sales Invoice",
+                "amendment_type": ["in", ["Virtual Sale", "Virtual Credit Note"]],
+                "status": "Sent",
+            },
+        )
+    )
+
+
+def validate_credit_note_against_active_amendments(doc, method=None):
+    """Sales Invoice `validate` hook. Virtual amendments and Credit Notes both
+    correct an already-filed sale - allowing both against the same invoice would
+    let two independent corrections race each other at Digitax/KRA. Block a
+    Credit Note from being created while a virtual amendment is in progress.
+    """
+    if not doc.is_return or not doc.return_against:
+        return
+
+    if has_active_virtual_amendments(doc.return_against):
+        frappe.throw(
+            _(
+                "{0} already has a Digitax virtual amendment in progress. Virtual amendments and "
+                "Credit Notes both correct a filed sale - use one or the other, not both."
+            ).format(frappe.bold(doc.return_against))
+        )
+
 
 def _load_virtual_amendment_context(invoice_name):
     doc = frappe.get_doc("Sales Invoice", invoice_name)

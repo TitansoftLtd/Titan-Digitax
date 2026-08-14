@@ -1,6 +1,10 @@
 import frappe
 from frappe import _
-from .sales import send_sales_invoice_to_digitax
+from .sales import send_sales_invoice_to_digitax, validate_credit_note_against_active_amendments
+
+
+def validate(doc, method):
+    validate_credit_note_against_active_amendments(doc, method)
 
 
 def on_submit(doc, method):
