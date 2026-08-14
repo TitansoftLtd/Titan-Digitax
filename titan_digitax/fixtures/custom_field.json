@@ -36,7 +36,7 @@
   "modified": "2026-01-26 16:11:40.103430",
   "module": "Titan Digitax",
   "name": "Sales Invoice-custom_trader_invoice_number",
-  "no_copy": 0,
+  "no_copy": 1,
   "non_negative": 0,
   "options": null,
   "permlevel": 0,
