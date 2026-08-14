@@ -80,6 +80,62 @@ def get_company_for_callback_token(token):
     return None
 
 
+def get_digitax_sync_user(company):
+    """The service account that automatic/background Digitax work runs as, and
+    that manual actions switch to after the initiating user's role is checked -
+    so the actor recorded against every Digitax write is always this one
+    consistent account, never whichever human or background-job identity
+    happened to trigger it.
+    """
+    user = frappe.db.get_value(COMPANY_DOCTYPE, company, "digitax_sync_user")
+    if not user:
+        frappe.throw(
+            _("Set Digitax Sync User in {0}'s Digitax Company Settings before Digitax actions can run.").format(
+                frappe.bold(company)
+            ),
+            title=_("Digitax Sync User Not Configured"),
+        )
+    return user
+
+
+def require_digitax_role(company, role_fieldname, action_description):
+    """Require the calling user to hold the role configured for role_fieldname on
+    this company's Digitax Company Settings, before letting them initiate an
+    action. Only gates who may START an action - see run_as_digitax_sync_user
+    for who actually performs it once started.
+    """
+    role = frappe.db.get_value(COMPANY_DOCTYPE, company, role_fieldname)
+    if not role:
+        frappe.throw(
+            _("Set {0} in {1}'s Digitax Company Settings before you can {2}.").format(
+                frappe.bold(role_fieldname), frappe.bold(company), action_description
+            ),
+            title=_("Digitax Role Not Configured"),
+        )
+    if role not in (frappe.get_roles() or []):
+        frappe.throw(
+            _("You need the {0} role to {1}.").format(frappe.bold(role), action_description),
+            title=_("Not Permitted"),
+        )
+
+
+def run_as_digitax_sync_user(company, fn):
+    """Run fn() with the session temporarily switched to this company's Digitax
+    Sync User, then always switch back - used both for manual actions (after
+    require_digitax_role has already confirmed the human may initiate) and for
+    automatic/background paths (which skip that check entirely, since they're
+    the system's own pipeline reacting to a legitimate event, not an arbitrary
+    user action).
+    """
+    sync_user = get_digitax_sync_user(company)
+    original_user = frappe.session.user
+    frappe.set_user(sync_user)
+    try:
+        return fn()
+    finally:
+        frappe.set_user(original_user)
+
+
 @frappe.whitelist()
 def get_company_digitax_status(company):
     """

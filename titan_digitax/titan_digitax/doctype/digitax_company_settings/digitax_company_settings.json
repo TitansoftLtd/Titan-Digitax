@@ -27,8 +27,12 @@
   "column_break_d14",
   "auto_sync_items_to_digitax",
   "auto_match_items_by_name",
-  "virtual_amendments_section",
+  "digitax_roles_section",
+  "send_role",
+  "item_sync_role",
   "virtual_amendment_role",
+  "column_break_digitax_roles",
+  "digitax_sync_user",
   "default_item_settings_section",
   "default_item_class_code",
   "default_item_type_code",
@@ -213,9 +217,23 @@
    "label": "Auto Match Items by Name"
   },
   {
-   "fieldname": "virtual_amendments_section",
+   "fieldname": "digitax_roles_section",
    "fieldtype": "Section Break",
-   "label": "Virtual Amendments"
+   "label": "Digitax Roles & Sync Identity"
+  },
+  {
+   "description": "Only users with this role can manually send a Sales Invoice to Digitax or view its Digitax/amendment status for this company.",
+   "fieldname": "send_role",
+   "fieldtype": "Link",
+   "label": "Send Role",
+   "options": "Role"
+  },
+  {
+   "description": "Only users with this role can manually sync a Digitax Item to this company's Digitax/KRA account.",
+   "fieldname": "item_sync_role",
+   "fieldtype": "Link",
+   "label": "Item Sync Role",
+   "options": "Role"
   },
   {
    "description": "Only users with this role can preview and send Digitax virtual amendments for this company.",
@@ -223,6 +241,18 @@
    "fieldtype": "Link",
    "label": "Virtual Amendment Role",
    "options": "Role"
+  },
+  {
+   "fieldname": "column_break_digitax_roles",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "digitaxsyncuser@example.com",
+   "description": "The account that automatic/background Digitax work (invoice submit, hourly retries, item auto-sync) always runs as, and that manual actions switch to once the initiating user's role above is confirmed - so every Digitax write is consistently attributed to one account rather than whichever user or background job happened to trigger it.",
+   "fieldname": "digitax_sync_user",
+   "fieldtype": "Link",
+   "label": "Digitax Sync User",
+   "options": "User"
   },
   {
    "fieldname": "default_item_settings_section",

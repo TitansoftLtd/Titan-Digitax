@@ -97,6 +97,37 @@ def get_digitax_item_for_invoice_item(item_code, company):
 
 @frappe.whitelist()
 def sync_digitax_item(digitax_item_name):
+	"""Interactive entrypoint (the "Sync to Digitax" button on the Digitax Item /
+	Item forms). The initiating user must hold this company's configured
+	item_sync_role; once confirmed, the actual sync always runs as the
+	company's Digitax Sync User (see company_config.run_as_digitax_sync_user)
+	so every Digitax write is consistently attributed to that one account.
+	"""
+	from titan_digitax.titan_digitax.utils.company_config import require_digitax_role, run_as_digitax_sync_user
+
+	company = frappe.db.get_value("Digitax Item", digitax_item_name, "company")
+	if not company:
+		frappe.throw(_("Digitax Item {0} not found.").format(digitax_item_name))
+	require_digitax_role(company, "item_sync_role", "sync a Digitax Item")
+	return run_as_digitax_sync_user(company, lambda: _sync_digitax_item_impl(digitax_item_name))
+
+
+def sync_digitax_item_automatic(digitax_item_name):
+	"""Automatic/background entrypoint - st_austins's auto-sync-on-item-create
+	(gated by that company's own auto_sync_items_to_digitax toggle) calls this
+	directly, never the whitelisted wrapper above. Not an arbitrary user action,
+	so no role is checked, but the sync still always runs as the company's
+	Digitax Sync User, same as the manual path.
+	"""
+	from titan_digitax.titan_digitax.utils.company_config import run_as_digitax_sync_user
+
+	company = frappe.db.get_value("Digitax Item", digitax_item_name, "company")
+	if not company:
+		frappe.throw(_("Digitax Item {0} not found.").format(digitax_item_name))
+	return run_as_digitax_sync_user(company, lambda: _sync_digitax_item_impl(digitax_item_name))
+
+
+def _sync_digitax_item_impl(digitax_item_name):
 	"""Manual "Sync to Digitax" action for one Digitax Item record.
 
 	Algorithm:

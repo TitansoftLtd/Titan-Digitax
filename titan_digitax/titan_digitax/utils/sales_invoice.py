@@ -1,6 +1,6 @@
 import frappe
 from frappe import _
-from .sales import send_sales_invoice_to_digitax, validate_credit_note_against_active_amendments
+from .sales import send_sales_invoice_to_digitax_automatic, validate_credit_note_against_active_amendments
 
 
 def validate(doc, method):
@@ -23,10 +23,15 @@ def on_submit(doc, method):
     # hourly retry sweep is what actually sends an invoice).
     #
     # All gating (global enable, target_country, company eligibility, and
-    # send-block/amend-allow) is still delegated to send_sales_invoice_to_digitax
-    # itself, inside the queued job.
+    # send-block/amend-allow) is still delegated to the shared implementation
+    # inside the queued job. This calls the automatic (unchecked) entrypoint,
+    # not the interactive whitelisted one - a background job enqueued here runs
+    # AS THE SUBMITTING USER (Frappe propagates the enqueuing session into the
+    # worker), so requiring a Digitax role on this path would silently break
+    # automatic sync for any normal Sales user without it. The send still always
+    # executes as the company's Digitax Sync User regardless.
     frappe.enqueue(
-        send_sales_invoice_to_digitax,
+        send_sales_invoice_to_digitax_automatic,
         queue="default",
         enqueue_after_commit=True,
         docname=doc.name,

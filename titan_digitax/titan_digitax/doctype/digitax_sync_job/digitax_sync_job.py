@@ -116,6 +116,11 @@ def execute_digitax_sync(direction=None, sync_type=None, company=None):
 			see SYNC_TYPES_BY_DIRECTION
 		company: The company whose Digitax Company Settings to sync with
 	"""
+	# Bulk action (an hour-long job, per company or across the catalogue) with no
+	# other caller than this page's own "Execute" button - System Manager only,
+	# same as the other bulk/multi-company Digitax entrypoints.
+	frappe.only_for("System Manager")
+
 	if not direction or direction.strip() == "":
 		frappe.throw("Please select a Direction before executing.")
 
@@ -257,7 +262,12 @@ def sync_invoices_to_digitax(company, job_id=None):
 	except (ValueError, TypeError):
 		retry_count = 5
 
-	from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax
+	# The automatic (unchecked) entrypoint - this runs inside a background job
+	# already gated at execute_digitax_sync (System Manager click to start it),
+	# not a per-invoice interactive send. Using the checked wrapper here would
+	# additionally require whoever clicked Execute to separately hold send_role
+	# too, even though they already passed a stricter gate to get here.
+	from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax_automatic
 
 	invoices = frappe.get_all(
 		"Sales Invoice",
@@ -279,7 +289,7 @@ def sync_invoices_to_digitax(company, job_id=None):
 	errors = []
 	for idx, invoice in enumerate(invoices, 1):
 		try:
-			send_sales_invoice_to_digitax(invoice)
+			send_sales_invoice_to_digitax_automatic(invoice)
 		except Exception as e:
 			errors.append(f"{invoice}: {e}")
 

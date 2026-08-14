@@ -9,6 +9,8 @@ from .company_config import (
     is_digitax_enabled_for_company,
     get_enabled_digitax_companies,
     get_digitax_settings,
+    require_digitax_role,
+    run_as_digitax_sync_user,
 )
 from .sales_items import build_digitax_items_payload
 from .actionable import create_actionable_item
@@ -144,6 +146,32 @@ def _write_digitax_response_fields(doc_name, field_mapping, logger, item_title, 
 
 @frappe.whitelist()
 def send_sales_invoice_to_digitax(docname):
+    """Interactive entrypoint (e.g. the "Send to Digitax" button). The initiating
+    user must hold this company's configured send_role; once confirmed, the
+    actual send always runs as the company's Digitax Sync User (see
+    company_config.run_as_digitax_sync_user) so every Digitax write is
+    consistently attributed to that one account.
+    """
+    company = frappe.db.get_value("Sales Invoice", docname, "company")
+    if not company:
+        frappe.throw(_("Sales Invoice {0} not found.").format(docname))
+    require_digitax_role(company, "send_role", "send an invoice to Digitax")
+    return run_as_digitax_sync_user(company, lambda: _send_sales_invoice_to_digitax_impl(docname))
+
+
+def send_sales_invoice_to_digitax_automatic(docname):
+    """Automatic/background entrypoint - on_submit's queued send and the hourly
+    retry sweep call this directly, never the whitelisted wrapper above. These
+    are the system's own pipeline reacting to a legitimate document event, not
+    an arbitrary user action, so there's no human to hold a role - but the work
+    still always runs as the company's Digitax Sync User, same as the manual
+    path, for a consistent actor across every Digitax write.
+    """
+    company = frappe.db.get_value("Sales Invoice", docname, "company")
+    return run_as_digitax_sync_user(company, lambda: _send_sales_invoice_to_digitax_impl(docname))
+
+
+def _send_sales_invoice_to_digitax_impl(docname):
     if not frappe.conf.get("sync_with_digitax"):
         return {
             "skipped": True,
@@ -383,6 +411,13 @@ def send_sales_invoice_to_digitax(docname):
 
 @frappe.whitelist()
 def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from_date=None, to_date=None, retry_count=None):
+    # This is a bulk action spanning potentially every company - not scoped to
+    # one company's send_role, so it's gated at the site level instead. The only
+    # production caller is job_retry_sending_sales_invoices's own enqueue, which
+    # already runs as Administrator (the scheduler's own identity) and passes
+    # this trivially; this check only bites a direct/manual API call.
+    frappe.only_for("System Manager")
+
     # Every setting (target country, max retries) is per company now, so each company's
     # invoices are queried separately using that company's own values rather than one
     # combined query spanning every enabled company.
@@ -478,7 +513,7 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
 
                 for invoice in invoices:
                     try:
-                        send_sales_invoice_to_digitax(invoice)
+                        send_sales_invoice_to_digitax_automatic(invoice)
                     except Exception as e:
                         errors.append(f"{invoice}: {e}")
                     finally:
@@ -515,6 +550,12 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
 
 @frappe.whitelist()
 def job_retry_sending_sales_invoices():
+    # The hourly cron calls this directly and always runs as Administrator (the
+    # scheduler's own identity), which trivially satisfies this - it only bites a
+    # direct/manual call by someone who isn't a System Manager. Bulk/multi-company
+    # action, not scoped to any one company's send_role.
+    frappe.only_for("System Manager")
+
     if not frappe.conf.get("sync_with_digitax"):
         frappe.msgprint("Digitax sync is disabled in site configuration")
         return {
@@ -1467,6 +1508,16 @@ def _build_virtual_sale_preview(doc, state, correction_reason):
 def get_digitax_virtual_amendment_status(invoice_name):
     doc = frappe.get_doc("Sales Invoice", invoice_name)
     digitax_settings = get_digitax_settings(doc.company)
+
+    # This runs automatically on every sent-invoice form load (to decide whether
+    # to show the amendment buttons), not on a deliberate user action - so unlike
+    # the interactive send/sync entrypoints, a caller without send_role gets a
+    # minimal "nothing to show" response rather than a thrown permission error,
+    # which would otherwise pop up an error dialog just from opening an invoice.
+    send_role = digitax_settings.get("send_role")
+    if not send_role or send_role not in (frappe.get_roles() or []):
+        return {"can_create": False}
+
     role = digitax_settings.get("virtual_amendment_role")
 
     can_create = bool(
