@@ -387,9 +387,17 @@ def get_school_invoice_print_context(doc):
 	The Fees table shows the actual item(s) built by build_digitax_items_payload —
 	the same aggregation that is literally POSTed to DigiTax — not the raw Sales
 	Invoice lines, so what's printed always matches what was sent.
+
+	This format prints what was actually filed, so it only makes sense once the
+	invoice has actually been sent - printing before that would either be blank
+	or misleadingly show what a hypothetical future send might look like.
 	"""
 	if isinstance(doc, str):
 		doc = frappe.get_doc("Sales Invoice", doc)
+
+	if not doc.custom_sent_to_digitax:
+		frappe.throw(_("This invoice has not been sent to Digitax yet."))
+
 	from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
 	from titan_digitax.titan_digitax.utils.sales_items import build_digitax_items_payload
 
@@ -397,7 +405,11 @@ def get_school_invoice_print_context(doc):
 	currency = doc.currency or frappe.db.get_value("Company", doc.company, "default_currency")
 
 	logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
-	built = build_digitax_items_payload(doc, digitax_settings, logger)
+	# dry_run=True: this is a read-only print action. If gates fail here despite
+	# custom_sent_to_digitax already being set (item master data changed since the
+	# original send), fall back to the raw invoice lines below rather than writing
+	# an error/Actionable Item just because someone opened Print.
+	built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True)
 
 	if built.get("ok"):
 		raw_items = built["items"]
