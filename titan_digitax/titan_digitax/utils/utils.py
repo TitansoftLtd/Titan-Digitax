@@ -129,10 +129,21 @@ def digitax_callback_sales_with_items():
         }
 
     except Exception as e:
+        # An exception here means a validly-addressed callback (we found the
+        # invoice/amendment row) failed to process for an unexpected/likely
+        # transient reason - a save conflict, a DB hiccup, etc. Digitax's docs
+        # don't document a retry policy either way, but responding with a real
+        # HTTP 500 (rather than a 200 with an error body, which looks identical
+        # to success from the caller's side) is the correct signal regardless -
+        # and gives Digitax a chance to retry if it ever does. Contrast with the
+        # "missing data" / "document not found" cases above, which stay 200:
+        # those are bad payloads or genuine mismatches, not transient failures,
+        # so retrying the exact same request would never help.
         frappe.log_error(
             title="Digitax Callback Error",
             message=frappe.get_traceback()
         )
+        frappe.local.response.http_status_code = 500
         return {
             "status": "error",
             "message": str(e)
