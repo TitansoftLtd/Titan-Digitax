@@ -57,7 +57,7 @@ class DigitaxCompanySettings(Document):
 		by trader_invoice_number. A per-company token lets the handler attribute a
 		callback to a company instead of trusting the payload alone.
 		"""
-		if self.is_new() and not self.get("callback_token"):
+		if not self.get("callback_token"):
 			self.callback_token = frappe.generate_hash(length=32)
 
 
