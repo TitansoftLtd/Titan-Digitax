@@ -197,7 +197,9 @@ def send_sales_invoice_to_digitax(docname):
             existing_sale_id = metadata.get("existing_sale_id", "")
             trader_invoice_number = metadata.get("trader_invoice_number", "")
             logger.info(f"Existing Sale ID: {existing_sale_id}, Trader Invoice Number: {trader_invoice_number}")
-            response_data = update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger)
+            response_data = update_invoice_with_existing_digitax_sale(
+                doc, existing_sale_id, logger, expected_payload=payload
+            )
         else:
             # A 409 we can't positively identify as "trader_invoice_number already
             # used". It's treated as a normal send failure (error saved, retried on
@@ -407,22 +409,105 @@ def fetch_sale_details_from_digitax(sale_id, company):
         return None
 
 
-def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger):
+def _reconcile_fetched_sale(expected_payload, sale_details):
+    """Compare a sale fetched from Digitax against what this invoice would have sent.
+
+    A 409 "already used" only proves the trader_invoice_number collided - it does not
+    prove the sale Digitax already holds is actually THIS invoice's sale (vs a stale ID,
+    a different invoice, or a Digitax-side data issue). Before adopting the fetched
+    sale's data as this invoice's own, verify the fetched sale's trader_invoice_number,
+    customer TIN (when we have one) and total amount all agree with what we tried to
+    send. Returns a list of human-readable mismatch descriptions - empty means it's safe
+    to accept.
+    """
+    mismatches = []
+    if not expected_payload:
+        return mismatches
+
+    expected_trader = expected_payload.get("trader_invoice_number")
+    fetched_trader = sale_details.get("trader_invoice_number")
+    if expected_trader and fetched_trader and str(expected_trader) != str(fetched_trader):
+        mismatches.append(
+            f"trader_invoice_number: expected {expected_trader!r}, Digitax has {fetched_trader!r}"
+        )
+
+    expected_tin = expected_payload.get("customer_tin")
+    fetched_tin = sale_details.get("customer_tin")
+    if expected_tin and fetched_tin and str(expected_tin) != str(fetched_tin):
+        mismatches.append(
+            f"customer_tin: expected {expected_tin!r}, Digitax has {fetched_tin!r}"
+        )
+
+    expected_items = expected_payload.get("items") or []
+    if expected_items:
+        expected_total = sum(float(item.get("total_amount") or 0) for item in expected_items)
+        fetched_total = sum(
+            float(item.get("total_amount") or 0) for item in (sale_details.get("item_list") or [])
+        )
+        # Small tolerance for per-line rounding, scaled to line count rather than a
+        # single flat value that would be too tight for a large invoice.
+        tolerance = max(1.0, 0.02 * len(expected_items))
+        if abs(fetched_total - expected_total) > tolerance:
+            mismatches.append(
+                f"total amount: expected {expected_total:.2f}, Digitax has {fetched_total:.2f} "
+                f"(tolerance {tolerance:.2f})"
+            )
+
+    return mismatches
+
+
+def _block_unverified_duplicate(doc, logger, reason, details):
+    """A 409 was recognized as 'trader_invoice_number already used', but we could not
+    verify (or could not even fetch) the sale Digitax says already exists. Refuse to
+    guess - leave the invoice unsent, record why, and raise a loud Actionable Item so a
+    human resolves it rather than the invoice being silently marked filed on faith.
+    """
+    logger.error(f"Refusing to mark {doc.name} as sent: {reason}")
+    error_msg = f"Digitax reported a duplicate trader_invoice_number, but {reason}."
+    frappe.db.set_value(
+        "Sales Invoice", doc.name, "custom_error_message", error_msg, update_modified=False
+    )
+    create_actionable_item(
+        title=f"Digitax Duplicate Not Verified: {doc.name}",
+        item_type="Digitax Duplicate Verification Failed",
+        description=(
+            f"<p><strong>Sales Invoice:</strong> {doc.name} got a 409 'trader_invoice_number "
+            f"already used' from Digitax, but the existing sale could not be verified as "
+            f"actually belonging to this invoice.</p>"
+            f"<p><strong>Reason:</strong> {reason}</p>"
+            f"<p>{details}</p>"
+            f"<p>This invoice has been left as NOT sent so it isn't wrongly marked filed. "
+            f"Check the sale in Digitax directly and either link it manually or resolve the "
+            f"mismatch before retrying.</p>"
+        ),
+        action_required="Verify the existing Digitax sale against this invoice and resolve manually",
+        reference_doctype="Sales Invoice",
+        reference_name=doc.name,
+        priority="High",
+    )
+    return {"success": False, "already_exists": True, "verified": False, "message": error_msg}
+
+
+def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger, expected_payload=None):
     """
     Update Sales Invoice fields when a duplicate is detected in Digitax.
-    Fetches full sale details and populates all Digitax custom fields.
-    Only updates fields if they are empty or values don't match.
-    
+    Fetches full sale details, reconciles them against what this invoice would have
+    sent (see _reconcile_fetched_sale), and only then populates the Digitax custom
+    fields. Only updates fields if they are empty or values don't match.
+
     Args:
         doc: Sales Invoice document
         existing_sale_id (str): The existing sale ID from Digitax
         logger: Logger instance
-        
+        expected_payload (dict): The payload this invoice would have sent (trader
+            invoice number, customer TIN, items) - used to verify the fetched sale is
+            actually this invoice's sale before trusting it.
+
     Returns:
         dict: Response data with success status and sale details
     """
     response_data = {}
-    
+
     # Helper function to update field only if value changed
     def update_field_if_changed(doctype, docname, fieldname, new_value):
         current_value = frappe.db.get_value(doctype, docname, fieldname)
@@ -441,9 +526,18 @@ def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger):
         sale_details = fetch_sale_details_from_digitax(existing_sale_id, doc.company)
         
         if sale_details:
+            mismatches = _reconcile_fetched_sale(expected_payload, sale_details)
+            if mismatches:
+                return _block_unverified_duplicate(
+                    doc,
+                    logger,
+                    reason="the fetched sale does not match this invoice",
+                    details="<ul>" + "".join(f"<li>{m}</li>" for m in mismatches) + "</ul>",
+                )
+
             # Update all Digitax fields with fetched data (only if changed)
             logger.info(f"Checking and updating invoice fields with Digitax details")
-            
+
             updated_fields = []
             
             # Map of field names to values from Digitax
@@ -477,50 +571,24 @@ def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger):
             response_data["success"] = True
             response_data["already_exists"] = True
         else:
-            # Failed to fetch details, just mark as sent with basic info
-            logger.warning(f"Could not fetch full sale details, updating with basic info only")
-            
-            updated_fields = []
-            basic_fields = {
-                "custom_sent_to_digitax": 1,
-                "custom_error_message": "",
-                "custom_digitax_status": "Already Exists",
-                "custom_sale_id": existing_sale_id,
-            }
-            
-            for field, value in basic_fields.items():
-                if update_field_if_changed("Sales Invoice", doc.name, field, value):
-                    updated_fields.append(field)
-            
-            if updated_fields:
-                logger.info(f"Updated fields: {', '.join(updated_fields)}")
-            
-            response_data["success"] = True
-            response_data["already_exists"] = True
-            response_data["id"] = existing_sale_id
-            response_data["status"] = "Already Exists"
+            # Could not fetch the sale Digitax says exists - no data to reconcile
+            # against, so there is nothing to verify this really is this invoice's
+            # sale. Do not guess.
+            return _block_unverified_duplicate(
+                doc,
+                logger,
+                reason=f"the existing sale ({existing_sale_id}) could not be fetched from Digitax to verify",
+                details="Fetching sale details failed - see the Digitax integration log for the underlying error.",
+            )
     else:
-        # No sale_id in metadata, just mark as sent
-        logger.warning(f"No existing_sale_id in metadata, marking as sent without full details")
-        
-        updated_fields = []
-        basic_fields = {
-            "custom_sent_to_digitax": 1,
-            "custom_error_message": "",
-            "custom_digitax_status": "Already Exists",
-        }
-        
-        for field, value in basic_fields.items():
-            if update_field_if_changed("Sales Invoice", doc.name, field, value):
-                updated_fields.append(field)
-        
-        if updated_fields:
-            logger.info(f"Updated fields: {', '.join(updated_fields)}")
-        
-        response_data["success"] = True
-        response_data["already_exists"] = True
-        response_data["status"] = "Already Exists"
-    
+        # No sale_id in metadata at all - nothing to fetch, nothing to verify.
+        return _block_unverified_duplicate(
+            doc,
+            logger,
+            reason="Digitax's response included no existing_sale_id to verify against",
+            details="Without a sale ID there is no way to confirm which sale this invoice was matched to.",
+        )
+
     logger.info(f"Invoice marked as synced (already exists in Digitax)")
     return response_data
 
