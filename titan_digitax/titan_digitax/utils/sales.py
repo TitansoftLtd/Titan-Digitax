@@ -299,6 +299,7 @@ def send_sales_invoice_to_digitax(docname):
                 "custom_time": response_data.get("time", ""),
                 "custom_receipt_type_code": response_data.get("receipt_type_code", ""),
                 "custom_original_sale_id": response_data.get("original_sale_id", ""),
+                "custom_error_message": "",
             },
             logger,
             item_title=f"Digitax Response Too Long To Save: {doc.name}",
