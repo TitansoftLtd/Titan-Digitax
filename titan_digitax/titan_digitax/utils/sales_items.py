@@ -9,6 +9,7 @@ import frappe
 
 from titan_digitax.titan_digitax.utils import digitax_item_sync
 from titan_digitax.titan_digitax.utils.actionable import create_actionable_item
+from titan_digitax.titan_digitax.utils.discount_handler import resolve_discount_handler
 
 
 def _round_qty1_amount(amount):
@@ -198,22 +199,23 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=Fals
 
 
 def _apply_discounts(doc, items_dict, discount_items, total_discounts, log, dry_run=False):
+	"""Redistribute the total discount value across items_dict's real item lines.
+
+	A negative-amount line ("this is actually a discount") isn't something
+	standard ERPNext discount entry produces on its own - it's specific to
+	whatever MIS integration maps a discount that way (e.g. Engage, via
+	st_austins). Redistributing it correctly needs that integration's own
+	knowledge (e.g. which items the discount is even meant to apply against,
+	how to split it across different tax types), so the actual algorithm is
+	delegated to whatever app declares digitax_discount_redistribution_handler
+	(see discount_handler.py) - titan_digitax itself only does the basic sanity
+	check (discount not bigger than the invoice) and, if no handler is
+	installed, refuses to guess and blocks instead of applying its own
+	naive largest-first split.
+	"""
 	log.info(f"Processing {len(discount_items)} discount items. Total discounts: {total_discounts}")
 
-	all_items = []
-	total_items_amount = 0
-	for display_name, item_data in items_dict.items():
-		all_items.append(
-			{
-				"display_name": display_name,
-				"description": item_data["item_description"],
-				"amount": item_data["total_amount"],
-				"item_data": item_data,
-			}
-		)
-		total_items_amount += item_data["total_amount"]
-
-	all_items.sort(key=lambda x: x["amount"], reverse=True)
+	total_items_amount = sum(item_data["total_amount"] for item_data in items_dict.values())
 
 	if total_discounts > total_items_amount:
 		discount_names = [f"{d['item_name']} ({d['discount_amount']})" for d in discount_items]
@@ -244,22 +246,57 @@ def _apply_discounts(doc, items_dict, discount_items, total_discounts, log, dry_
 			)
 		return _block_send(doc, error_msg, "discounts_exceed_total", log, dry_run)
 
-	remaining_discount = total_discounts
-	for item in all_items:
-		if remaining_discount <= 0:
-			break
-		item_data = item["item_data"]
-		original_amount = item["amount"]
-		if remaining_discount >= original_amount:
-			new_amount = 0
-			remaining_discount -= original_amount
-		else:
-			new_amount = original_amount - remaining_discount
-			remaining_discount = 0
-		qty, unit_pr, total_amt = _round_qty1_amount(new_amount)
-		item_data["quantity"] = qty
-		item_data["unit_price"] = unit_pr
-		item_data["total_amount"] = total_amt
+	handler = resolve_discount_handler()
+	if handler:
+		try:
+			handler(items_dict, discount_items, total_discounts, doc, log)
+			return None
+		except Exception as e:
+			error_msg = str(e)
+			log.error(f"Discount redistribution handler failed: {error_msg}")
+			if not dry_run:
+				create_actionable_item(
+					title=f"Digitax Discount Redistribution Failed: {doc.name}",
+					item_type="Discount Validation Error",
+					description=(
+						f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
+						f"<p><strong>Issue:</strong> {error_msg}</p>"
+					),
+					action_required="Resolve the discount allocation on this invoice, or adjust amounts",
+					reference_doctype="Sales Invoice",
+					reference_name=doc.name,
+					related_data=frappe.as_json({"discount_items": discount_items}),
+					priority="High",
+				)
+			return _block_send(doc, error_msg, "discount_redistribution_failed", log, dry_run)
+
+	# No handler resolved - refuse to guess how to redistribute an unexpected
+	# negative-amount line rather than silently applying a naive split.
+	discount_names = [f"{d['item_name']} ({d['discount_amount']})" for d in discount_items]
+	error_msg = (
+		f"This invoice has {len(discount_items)} negative-amount line(s) that look like "
+		f"discounts ({', '.join(discount_names)}), but no installed app declares "
+		f"digitax_discount_redistribution_handler to redistribute them. This isn't "
+		f"standard ERPNext discount entry - refusing to guess how to apply it."
+	)
+	if not dry_run:
+		create_actionable_item(
+			title=f"Digitax Discount Handling Not Configured: {doc.name}",
+			item_type="Discount Validation Error",
+			description=(
+				f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
+				f"<p>{error_msg}</p>"
+			),
+			action_required=(
+				"Install/configure an app that declares digitax_discount_redistribution_handler, "
+				"or resolve this invoice's discount line(s) manually"
+			),
+			reference_doctype="Sales Invoice",
+			reference_name=doc.name,
+			related_data=frappe.as_json({"discount_items": discount_items}),
+			priority="High",
+		)
+	return _block_send(doc, error_msg, "discount_handler_not_configured", log, dry_run)
 
 	return None
 
