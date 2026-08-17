@@ -439,7 +439,18 @@ def get_school_invoice_print_context(doc):
 	company["tagline"] = digitax_settings.get("print_tagline") or ""
 	company["po_box"] = digitax_settings.get("po_box") or ""
 
-	customer_code = frappe.db.get_value("Customer", doc.customer, "customer_code") or ""
+	# customer_code is an st_austins-owned custom field (Engage's own account code
+	# for this customer) - titan_digitax ships no such field itself, so on a
+	# generic install without st_austins the column doesn't exist in the database
+	# at all. Reading it unconditionally raises OperationalError: Unknown column,
+	# crashing the print button outright. The template already hides this row
+	# entirely when blank ({% if ctx.customer.account_code %}), so falling back
+	# to "" here is a complete fix, not a partial one.
+	customer_code = (
+		frappe.db.get_value("Customer", doc.customer, "customer_code")
+		if frappe.get_meta("Customer").has_field("customer_code")
+		else None
+	) or ""
 	reference_no = getattr(doc, "custom_engage_invoice_number", None) or doc.name
 	digitax_details = get_active_digitax_details(doc)
 
