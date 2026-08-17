@@ -42,13 +42,24 @@ def is_digitax_enabled_for_company(company):
 
 
 def get_digitax_settings(company):
-    """Return this company's Digitax Company Settings doc. Throws if none exists."""
+    """Return this company's Digitax Company Settings doc. Throws if none exists.
+
+    Reached by callers that don't pre-check existence themselves (the real send path
+    has its own softer skip-gate before ever calling this) - notably both print
+    formats, where hitting this is an expected, benign "not onboarded yet" state on
+    a freshly-added company, not a bug. The message is written to be actionable
+    there: what's missing and where to go fix it, not just the bare fact.
+    """
     if not company:
         frappe.throw(_("A company is required to resolve DigiTax settings."))
     if not frappe.db.exists(COMPANY_DOCTYPE, company):
         frappe.throw(
-            _("No Digitax Company Settings exist for {0}.").format(frappe.bold(company)),
-            title=_("DigiTax Not Configured"),
+            _(
+                "{0} has no Digitax Company Settings yet. Create one from the Digitax Company "
+                "Settings list (Desk search, or the Titan Digitax workspace sidebar) before "
+                "using Digitax features - printing, sending, or syncing - for this company."
+            ).format(frappe.bold(company)),
+            title=_("Digitax Not Configured"),
         )
     return frappe.get_cached_doc(COMPANY_DOCTYPE, company)
 
