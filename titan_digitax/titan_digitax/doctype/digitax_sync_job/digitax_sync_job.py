@@ -26,6 +26,21 @@ class DigitaxSyncJob(Document):
 	pass
 
 
+PROGRESS_FLUSH_EVERY = 20
+
+
+def _should_flush_progress(idx, total):
+	"""Throttle for the per-record sync loops below: _update_job_record does a
+	frappe.db.exists + set_value + frappe.db.commit() every time it's called, which
+	is fine for status/error updates (rare, and pollers should see them
+	immediately) but not for a plain progress counter ticking once per record -
+	that's ~40k extra queries + 20k commits for a 20k-item catalogue sync, with
+	each commit flushing mid-progress so a crash leaves no clean resume point.
+	Always flushes on the last record so the final state is never stale.
+	"""
+	return idx % PROGRESS_FLUSH_EVERY == 0 or idx == total
+
+
 def _update_job_record(job_id=None, direction=None, sync_type=None, company=None, **fields):
 	"""Create-or-update the job row for job_id. First call for a job_id creates the row
 	(direction/sync_type/company are only used then); every call after that only writes
@@ -293,11 +308,12 @@ def sync_invoices_to_digitax(company, job_id=None):
 		except Exception as e:
 			errors.append(f"{invoice}: {e}")
 
-		percentage = 20 + int((idx / total) * 70) if total else 90
-		_update_job_record(
-			job_id=job_id, processed_records=idx, errors=len(errors),
-			percentage_complete=percentage, last_message=f"Processed {idx}/{total}: {invoice}",
-		)
+		if _should_flush_progress(idx, total):
+			percentage = 20 + int((idx / total) * 70) if total else 90
+			_update_job_record(
+				job_id=job_id, processed_records=idx, errors=len(errors),
+				percentage_complete=percentage, last_message=f"Processed {idx}/{total}: {invoice}",
+			)
 
 	still_unsent = (
 		frappe.db.count(
@@ -581,12 +597,13 @@ def sync_items_from_digitax(company, start_time=None, end_time=None, job_id=None
 			frappe.log_error(frappe.get_traceback(), f"Digitax Item Sync Error - {item_data.get('item_name', 'Unknown')}")
 			errors.append(error_msg)
 
-		percentage = 20 + int((idx / total) * 70) if total else 90
-		_update_job_record(
-			job_id=job_id, processed_records=idx, skipped_records=skipped, errors=len(errors),
-			percentage_complete=percentage,
-			last_message=f"Processed {idx}/{total}: {item_data.get('item_name', 'Unknown')}",
-		)
+		if _should_flush_progress(idx, total):
+			percentage = 20 + int((idx / total) * 70) if total else 90
+			_update_job_record(
+				job_id=job_id, processed_records=idx, skipped_records=skipped, errors=len(errors),
+				percentage_complete=percentage,
+				last_message=f"Processed {idx}/{total}: {item_data.get('item_name', 'Unknown')}",
+			)
 
 	# Commit all changes
 	frappe.db.commit()
