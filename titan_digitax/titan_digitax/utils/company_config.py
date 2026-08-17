@@ -26,12 +26,33 @@ COMPANY_DOCTYPE = "Digitax Company Settings"
 # clear_callback_token_index_cache() whenever a company's settings are saved/deleted.
 CALLBACK_TOKEN_INDEX_CACHE_KEY = "titan_digitax:callback_token_index"
 
+# is_digitax_enabled_for_company is called once per Sales Invoice line (via
+# get_digitax_item_for_invoice_item), so an uncached full-table scan here means
+# ~100k queries for a 500-invoice retry sweep at 50 lines each. Cached the same way
+# as the callback token index - invalidated whenever a company's settings are
+# saved/deleted (enabled could have flipped, or a new company added).
+ENABLED_COMPANIES_CACHE_KEY = "titan_digitax:enabled_companies"
+
 
 def get_enabled_digitax_companies():
     """Return company names enabled for DigiTax, per Digitax Company Settings."""
+    cached = frappe.cache().get_value(ENABLED_COMPANIES_CACHE_KEY)
+    if cached is not None:
+        return cached
+
     if not frappe.db.table_exists(COMPANY_DOCTYPE):
         return []
-    return sorted(frappe.get_all(COMPANY_DOCTYPE, filters={"enabled": 1}, pluck="company"))
+
+    companies = sorted(frappe.get_all(COMPANY_DOCTYPE, filters={"enabled": 1}, pluck="company"))
+    frappe.cache().set_value(ENABLED_COMPANIES_CACHE_KEY, companies)
+    return companies
+
+
+def clear_enabled_companies_cache():
+    """Call whenever a Digitax Company Settings row is saved or deleted - enabled
+    could have flipped, or a new/removed company needs to be reflected.
+    """
+    frappe.cache().delete_value(ENABLED_COMPANIES_CACHE_KEY)
 
 
 def is_digitax_enabled_for_company(company):
