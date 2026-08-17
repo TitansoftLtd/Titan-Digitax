@@ -6,7 +6,6 @@ from frappe.utils import fmt_money, get_url
 from frappe.www.printview import validate_print_permission
 
 from titan_digitax.titan_digitax.utils.sales import (
-	_get_default_digitax_item,
 	_get_trader_invoice_base,
 	resolve_digitax_customer_pin,
 )
@@ -182,20 +181,28 @@ def get_qr_code_data_uri(text):
 	return f"data:image/png;base64,{encoded}"
 
 
-def get_digitax_tax_breakdown(tax_type_code, amount):
-	"""Build the five tax-class rows shown on Digitax receipts."""
-	tax_type_code = (tax_type_code or "D").upper()
-	amount = abs(float(amount or 0))
-	rows = []
+def get_digitax_tax_breakdown(items):
+	"""Build the five tax-class rows shown on Digitax receipts, aggregated across
+	every item - each item may carry a different tax_type_code (a real invoice can
+	mix VATable and exempt items), so this sums each class's taxable amount across
+	all items instead of assuming a single class for the whole invoice.
 
+	Args:
+		items: list of dicts, each with "tax_type_code" and "total_amount".
+	"""
+	totals = {code: 0.0 for code in ("A", "B", "C", "D", "E")}
+
+	for entry in items:
+		code = (entry.get("tax_type_code") or "D").upper()
+		if code not in totals:
+			code = "D"
+		totals[code] += abs(float(entry.get("total_amount") or 0))
+
+	rows = []
 	for code in ("A", "B", "C", "D", "E"):
 		rate = TAX_CLASS_RATES[code]
-		if code == tax_type_code:
-			taxable_amount = amount
-			tax_amount = round(amount * rate / 100, 2) if rate else 0
-		else:
-			taxable_amount = 0
-			tax_amount = 0
+		taxable_amount = round(totals[code], 2)
+		tax_amount = round(taxable_amount * rate / 100, 2) if rate else 0
 
 		rows.append(
 			{
@@ -210,26 +217,61 @@ def get_digitax_tax_breakdown(tax_type_code, amount):
 	return rows
 
 
-def get_digitax_print_item(doc, digitax_settings=None):
-	"""Return the consolidated Digitax item line for print display."""
+def get_digitax_print_items(doc, digitax_settings=None):
+	"""Return the real Digitax item lines for print display - the same aggregation
+	actually POSTed to Digitax, not a single synthetic whole-invoice line.
+
+	dry_run=True: this is a read-only print action, never write/commit/raise an
+	Actionable Item just because someone opened Print. If gates fail (e.g. missing
+	item links), falls back to the raw invoice lines so the printout isn't empty,
+	same pattern as get_school_invoice_print_context.
+	"""
 	if digitax_settings is None:
 		from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
 
 		digitax_settings = get_digitax_settings(doc.company)
-	include_sale_fields = not doc.is_return
-	item = _get_default_digitax_item(doc, digitax_settings, include_sale_fields)
-	currency = doc.currency or frappe.db.get_value("Company", doc.company, "default_currency")
 
-	return {
-		"item_name": item.get("item_name") or item.get("item_description") or "School Fees",
-		"quantity": item.get("quantity") or 1,
-		"unit_price": item.get("unit_price") or 0,
-		"total_amount": item.get("total_amount") or 0,
-		"tax_type_code": item.get("item_tax_type_code") or "D",
-		"currency": currency,
-		"formatted_unit_price": fmt_money(item.get("unit_price") or 0, currency=currency),
-		"formatted_total_amount": fmt_money(item.get("total_amount") or 0, currency=currency),
-	}
+	from titan_digitax.titan_digitax.utils.sales_items import build_digitax_items_payload
+
+	currency = doc.currency or frappe.db.get_value("Company", doc.company, "default_currency")
+	logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
+	built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True)
+
+	if built.get("ok"):
+		raw_items = built["items"]
+		return [
+			{
+				"item_name": entry.get("item_name") or entry.get("item_description") or "Item",
+				"quantity": entry.get("quantity") or 1,
+				"unit_price": entry.get("unit_price") or 0,
+				"total_amount": entry.get("total_amount") or 0,
+				# Only set for sales, never for credit notes - no per-item tax type
+				# exists to prorate against on the return side either way.
+				"tax_type_code": entry.get("item_tax_type_code") or "D",
+				"currency": currency,
+				"formatted_unit_price": fmt_money(entry.get("unit_price") or 0, currency=currency),
+				"formatted_total_amount": fmt_money(entry.get("total_amount") or 0, currency=currency),
+			}
+			for entry in raw_items
+		]
+
+	# Nothing valid was built for Digitax (e.g. item master data drifted since the
+	# original send) — fall back to the raw invoice lines so the printout isn't
+	# empty. No real tax_type_code available here, defaults to "D" in the tax
+	# breakdown below like any other fallback item.
+	return [
+		{
+			"item_name": row.item_name or row.description or row.item_code,
+			"quantity": abs(row.qty or 1),
+			"unit_price": abs(row.rate or 0),
+			"total_amount": abs(row.amount or 0),
+			"tax_type_code": "D",
+			"currency": currency,
+			"formatted_unit_price": fmt_money(abs(row.rate or 0), currency=currency),
+			"formatted_total_amount": fmt_money(abs(row.amount or 0), currency=currency),
+		}
+		for row in doc.items
+	]
 
 
 def _normalize_header_digitax_details(doc):
@@ -333,18 +375,30 @@ def _get_company_details(company_name):
 
 
 def get_digitax_print_context(doc):
-	"""Build the print context used by the Digitax Tax Invoice print format."""
+	"""Build the print context used by the Digitax Tax Invoice print format.
+
+	Shows the real item(s) build_digitax_items_payload produces - the same
+	aggregation actually POSTed to Digitax - instead of a single synthetic
+	whole-invoice line, so what's printed always matches what was sent. This
+	format prints what was actually filed, so (like Sales Invoice(Digitax))
+	it requires custom_sent_to_digitax first.
+	"""
 	if isinstance(doc, str):
 		doc = frappe.get_doc("Sales Invoice", doc)
+
+	if not doc.custom_sent_to_digitax:
+		frappe.throw(_("This invoice has not been sent to Digitax yet."))
+
 	from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
 
 	digitax_settings = get_digitax_settings(doc.company)
 	digitax_details = get_active_digitax_details(doc)
 	customer_pin = resolve_digitax_customer_pin(doc)
-	item = get_digitax_print_item(doc, digitax_settings)
-	tax_rows = get_digitax_tax_breakdown(item.get("tax_type_code"), item.get("total_amount"))
+	items = get_digitax_print_items(doc, digitax_settings)
+	tax_rows = get_digitax_tax_breakdown(items)
 	tax_rows = [row for row in tax_rows if row.get("taxable_amount") or row.get("tax_amount")]
-	currency = item.get("currency") or doc.currency
+	currency = (items[0].get("currency") if items else None) or doc.currency
+	grand_total = sum(entry.get("total_amount") or 0 for entry in items)
 
 	document_title = "Credit Note" if doc.is_return else "Sale Invoice"
 	status_text = (digitax_details or {}).get("status") or ""
@@ -371,10 +425,14 @@ def get_digitax_print_context(doc):
 			"pin": customer_pin.get("pin") or "",
 			"pin_source": customer_pin.get("source") or "",
 		},
-		"item": item,
+		# Named line_items, not items - ctx is a plain dict, and Jinja's attribute
+		# resolution tries getattr(ctx, "items") before falling back to
+		# ctx["items"], so `ctx.items` in the template would silently resolve to
+		# the dict's own built-in .items() method instead of this list.
+		"line_items": items,
 		"tax_rows": tax_rows,
 		"currency": currency,
-		"formatted_grand_total": fmt_money(item.get("total_amount") or 0, currency=currency),
+		"formatted_grand_total": fmt_money(grand_total, currency=currency),
 		"scu_invoice_no": scu_invoice_no,
 		"invoice_name": doc.name,
 		"posting_date": doc.posting_date,

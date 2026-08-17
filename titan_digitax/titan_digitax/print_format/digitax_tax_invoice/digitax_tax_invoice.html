@@ -1,10 +1,3 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Digitax Tax Invoice</title>
-</head>
-<body>
 {% set ctx = get_digitax_print_context(doc) %}
 
 <div class="digitax-receipt">
@@ -78,12 +71,14 @@
         </tr>
       </thead>
       <tbody>
+        {% for item in ctx.line_items %}
         <tr>
-          <td>{{ ctx.item.item_name }}</td>
-          <td class="text-right">{{ ctx.item.formatted_unit_price }}</td>
-          <td class="text-right">x{{ ctx.item.quantity | int }}</td>
-          <td class="text-right">{{ ctx.item.formatted_total_amount }}</td>
+          <td>{{ item.item_name }}</td>
+          <td class="text-right">{{ item.formatted_unit_price }}</td>
+          <td class="text-right">x{{ item.quantity | int }}</td>
+          <td class="text-right">{{ item.formatted_total_amount }}</td>
         </tr>
+        {% endfor %}
       </tbody>
     </table>
     <div class="total-row">
@@ -149,5 +144,3 @@
 
   {% endif %}
 </div>
-</body>
-</html>
