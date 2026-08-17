@@ -12,7 +12,7 @@
  "link_to": "Titan Digitax",
  "link_type": "Workspace Sidebar",
  "logo_url": "/assets/titan_digitax/icons/desktop_icons/subtle/titan_digitax.svg",
- "modified": "2026-08-03 20:07:51.380571",
+ "modified": "2026-08-18 00:03:38.585374",
  "modified_by": "Administrator",
  "name": "Titan Digitax",
  "owner": "Administrator",
@@ -20,7 +20,7 @@
  "restrict_removal": 0,
  "roles": [
   {
-   "role": "Accounts Manager"
+   "role": "System Manager"
   }
  ],
  "standard": 1
