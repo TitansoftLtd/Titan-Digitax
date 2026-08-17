@@ -16,6 +16,15 @@ class DigitaxCompanySettings(Document):
 	def on_update(self):
 		# Credentials are cached per company by the resolver.
 		frappe.clear_cache(doctype="Digitax Company Settings")
+		self._clear_callback_token_index()
+
+	def on_trash(self):
+		self._clear_callback_token_index()
+
+	def _clear_callback_token_index(self):
+		from titan_digitax.titan_digitax.utils.company_config import clear_callback_token_index_cache
+
+		clear_callback_token_index_cache()
 
 	def _validate_company_country(self):
 		"""A company can only file to DigiTax if it's in its own configured target country."""

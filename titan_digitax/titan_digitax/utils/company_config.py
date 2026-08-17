@@ -18,6 +18,14 @@ from frappe.utils.password import get_decrypted_password
 
 COMPANY_DOCTYPE = "Digitax Company Settings"
 
+# Reverse index (token -> company) for the guest-accessible callback endpoint. Without
+# this, attributing a callback to a company meant decrypting and comparing every
+# company's token in a loop on every single callback request - fine for a couple of
+# companies, not something that should scale linearly with tenant count on an
+# unauthenticated endpoint. Invalidated explicitly by
+# clear_callback_token_index_cache() whenever a company's settings are saved/deleted.
+CALLBACK_TOKEN_INDEX_CACHE_KEY = "titan_digitax:callback_token_index"
+
 
 def get_enabled_digitax_companies():
     """Return company names enabled for DigiTax, per Digitax Company Settings."""
@@ -70,14 +78,38 @@ def get_digitax_callback_token(company=None):
     return get_decrypted_password(COMPANY_DOCTYPE, company, "callback_token", raise_exception=False)
 
 
+def _build_callback_token_index():
+    """token -> company, decrypting every company's token once to build the index."""
+    index = {}
+    for company in frappe.get_all(COMPANY_DOCTYPE, pluck="company"):
+        token = get_digitax_callback_token(company)
+        if token:
+            index[token] = company
+    return index
+
+
+def clear_callback_token_index_cache():
+    """Call whenever a Digitax Company Settings row is saved or deleted - the cached
+    index would otherwise keep mapping a rotated/removed token to the wrong (or a
+    no-longer-configured) company until it next happened to be rebuilt.
+    """
+    frappe.cache().delete_value(CALLBACK_TOKEN_INDEX_CACHE_KEY)
+
+
 def get_company_for_callback_token(token):
-    """Reverse the callback token back to a company, for attributing a callback."""
+    """Reverse the callback token back to a company, for attributing a callback.
+
+    Backed by a cached index instead of decrypting and comparing every company's
+    token in a loop on every call - this runs on every hit to the guest-accessible
+    callback endpoint.
+    """
     if not token:
         return None
-    for company in frappe.get_all(COMPANY_DOCTYPE, pluck="company"):
-        if get_digitax_callback_token(company) == token:
-            return company
-    return None
+    index = frappe.cache().get_value(CALLBACK_TOKEN_INDEX_CACHE_KEY)
+    if index is None:
+        index = _build_callback_token_index()
+        frappe.cache().set_value(CALLBACK_TOKEN_INDEX_CACHE_KEY, index)
+    return index.get(token)
 
 
 def get_digitax_sync_user(company):
