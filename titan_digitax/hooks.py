@@ -166,6 +166,7 @@ scheduler_events = {
         "0 * * * *": [
             "titan_digitax.titan_digitax.utils.sales.job_retry_sending_sales_invoices",
             "titan_digitax.titan_digitax.doctype.digitax_sync_job.digitax_sync_job.digitax_sync_items_hourly",
+            "titan_digitax.titan_digitax.utils.reconciliation.job_reconcile_stale_digitax_sales",
         ]
     }
 	# "all": [
