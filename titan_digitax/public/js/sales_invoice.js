@@ -150,15 +150,6 @@ const add_print_digitax_button = (frm) => {
 	}
 
 	frm.add_custom_button(__("Print Digitax Invoice"), function () {
-		// Official Digitax receipt page (receipt.dg.tax) rendered to PDF on the server.
-		// const download_url =
-		// 	frappe.urllib.get_full_url(
-		// 		"/api/method/titan_digitax.titan_digitax.utils.print_format.download_digitax_receipt_pdf"
-		// 	) +
-		// 	"?invoice_name=" +
-		// 	encodeURIComponent(frm.doc.name);
-		// window.open(download_url);
-
 		frappe.utils.print(frm.doctype, frm.doc.name, "Sales Invoice(Digitax)");
 	}, __("Digitax Actions"));
 };

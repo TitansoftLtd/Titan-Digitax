@@ -20,43 +20,12 @@ bench install-app titan_digitax
 Desk data (Company, Digitax Company Settings, the actual Digitax-sent line items), no
 external service or headless browser involved.
 
-#### Playwright-based alternative (currently disabled, code still present)
-
-There is a second mechanism, `download_digitax_receipt_pdf` in
-`titan_digitax/titan_digitax/utils/print_format.py`, which renders the live
-[receipt.dg.tax](https://receipt.dg.tax) page for an invoice's `custom_offline_url` as a
-styled PDF server-side via Playwright. **Its only caller in `sales_invoice.js` is
-commented out** — it is not reachable from the UI today. To re-enable it, uncomment the
-`download_url`/`window.open(download_url)` block in `add_print_digitax_button` (replacing
-the `frappe.utils.print(...)` call below it), and complete this one-time setup:
-
-```bash
-bench pip install playwright
-playwright install chromium
-```
-
-Use the second command when Google Chrome / Chromium is **not** already installed on the
-server. Alternatively, set a custom browser path in `site_config.json`:
-
-```json
-{
-  "chrome_path": "/usr/bin/chromium-browser"
-}
-```
-
-Then rebuild assets and restart:
-
-```bash
-bench build --app titan_digitax
-bench restart
-```
-
-Common issues if re-enabling this path (kept for future troubleshooting):
-
-| Symptom | Cause | Fix |
-|--------|--------|-----|
-| **PDF has no styles** — plain unstyled text, missing colours/layout | `receipt.dg.tax` is a JavaScript app. **wkhtmltopdf** (used for normal Frappe print formats) does not execute that JS/CSS, so it only captures bare HTML. | Ensure **Playwright** is installed (`bench pip install playwright`) and a headless browser is available (system Chrome/Chromium or `playwright install chromium`). |
-| **PDF is cut off at the bottom** — footer, tax rows, signature, or internal data missing; looks like only the first screen was printed | The Digitax receipt page traps content in **`h-screen` / `overflow: auto`** containers (~900px viewport, ~2000px content). A naive headless print only captures the visible viewport. | The integration expands those scroll containers and sizes the PDF page to the full content height before printing. If this regresses, check `EXPAND_SCROLL_CONTAINERS_JS` in `print_format.py`. |
+There was previously a second mechanism, `download_digitax_receipt_pdf`, which rendered
+the live [receipt.dg.tax](https://receipt.dg.tax) page for an invoice's `custom_offline_url`
+as a styled PDF server-side via a headless browser (Playwright). It was never wired up to
+the UI (its only caller was commented out) and Playwright was never actually installed in
+any environment running this app, so it was removed entirely rather than kept around
+disabled. The in-app print format above is the only receipt/print path now.
 
 #### When `Digitax Actions` does not appear
 
