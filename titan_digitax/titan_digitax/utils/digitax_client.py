@@ -10,10 +10,43 @@ import frappe
 import requests
 from frappe import _
 
+# DigiTax's GET /items has no name/code filter (confirmed against their published
+# OpenAPI spec - only before/after/page_size, pure pagination) and no dedicated
+# search endpoint exists anywhere in their API, so a name lookup has no cheaper
+# option than walking every page. Caching the full catalogue as a name->item map
+# means a burst of separate lookups against the same company (e.g. Engage
+# creating several new items in a row, each triggering its own auto-sync) only
+# pays for the walk once instead of per item, at the cost of every lookup -
+# including a lone, isolated one - now always walking the full catalogue to
+# populate the cache rather than potentially exiting early once a match is
+# found. Short TTL bounds how stale a "not found" answer can get if the real
+# catalogue changes elsewhere; explicitly invalidated on this client's own
+# create_item calls too.
+ITEM_CATALOGUE_CACHE_TTL_SECONDS = 300
+
 
 class DigitaxClient:
 	"""Client for interacting with Digitax API to pull data."""
-	
+
+	def _item_catalogue_cache_key(self):
+		return f"titan_digitax:item_catalogue:{self.company}"
+
+	def _get_cached_item_catalogue(self):
+		return frappe.cache().get_value(self._item_catalogue_cache_key())
+
+	def _set_cached_item_catalogue(self, catalogue):
+		frappe.cache().set_value(
+			self._item_catalogue_cache_key(), catalogue, expires_in_sec=ITEM_CATALOGUE_CACHE_TTL_SECONDS
+		)
+
+	def invalidate_item_catalogue_cache(self):
+		"""Call after any write that changes this company's DigiTax catalogue (e.g.
+		create_item succeeding) - a cached "not found" answer must never outlive
+		an item that was just created.
+		"""
+		frappe.cache().delete_value(self._item_catalogue_cache_key())
+
+
 	def __init__(self, company):
 		"""Initialize client with this company's own Digitax Company Settings."""
 		from titan_digitax.titan_digitax.utils.company_config import (
@@ -200,9 +233,11 @@ class DigitaxClient:
 		"""
 		Look for an existing DigiTax catalogue item with this exact item_name.
 
-		DigiTax's GET /items has no name filter — this walks pages until it finds
-		an exact match (or exhausts the catalogue), stopping as soon as one is
-		found rather than fetching everything first.
+		DigiTax's GET /items has no name filter and no search endpoint exists
+		anywhere in their API, so a name lookup has to walk pages regardless.
+		Backed by a short-TTL cached name->item map (see ITEM_CATALOGUE_CACHE_TTL_SECONDS
+		above) so a burst of separate lookups against this company only pays for
+		the walk once.
 
 		Returns the raw DigiTax item dict, or None if no match exists.
 		"""
@@ -210,10 +245,18 @@ class DigitaxClient:
 		if not target:
 			return None
 
+		cached = self._get_cached_item_catalogue()
+		if cached is not None:
+			return cached.get(target)
+
+		catalogue = {}
 		for item in self._paginate_items():
-			if (item.get("item_name") or "").strip() == target:
-				return item
-		return None
+			name = (item.get("item_name") or "").strip()
+			if name:
+				catalogue[name] = item
+
+		self._set_cached_item_catalogue(catalogue)
+		return catalogue.get(target)
 	
 	def create_item(self, payload):
 		"""
@@ -258,7 +301,13 @@ class DigitaxClient:
 				f"Item creation response: HTTP {response.status_code}, "
 				f"ID: {data.get('id')}, ETIMS: {data.get('etims_item_code')}"
 			)
-			
+
+			# The cached catalogue (if any) is now stale - it wouldn't contain
+			# this item. A cached "not found" must never outlive an item that
+			# was just created, or the next lookup in the same burst would
+			# wrongly think it still needs creating.
+			self.invalidate_item_catalogue_cache()
+
 			return data
 			
 		except requests.exceptions.Timeout:

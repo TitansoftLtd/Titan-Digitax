@@ -88,7 +88,7 @@ jinja = {
 	"methods": [
 		"titan_digitax.titan_digitax.utils.print_format.get_digitax_print_context",
 		"titan_digitax.titan_digitax.utils.print_format.get_qr_code_data_uri",
-		"titan_digitax.titan_digitax.utils.print_format.get_school_invoice_print_context",
+		"titan_digitax.titan_digitax.utils.print_format.get_sales_invoice_digitax_print_context",
 	],
 }
 
@@ -152,7 +152,9 @@ jinja = {
 
 doc_events = {
 	"Sales Invoice": {
-        "on_submit": "titan_digitax.titan_digitax.utils.sales_invoice.on_submit"
+        "validate": "titan_digitax.titan_digitax.utils.sales_invoice.validate",
+        "on_submit": "titan_digitax.titan_digitax.utils.sales_invoice.on_submit",
+        "on_cancel": "titan_digitax.titan_digitax.utils.sales_invoice.on_cancel"
     },
 }
 
@@ -164,6 +166,7 @@ scheduler_events = {
         "0 * * * *": [
             "titan_digitax.titan_digitax.utils.sales.job_retry_sending_sales_invoices",
             "titan_digitax.titan_digitax.doctype.digitax_sync_job.digitax_sync_job.digitax_sync_items_hourly",
+            "titan_digitax.titan_digitax.utils.reconciliation.job_reconcile_stale_digitax_sales",
         ]
     }
 	# "all": [

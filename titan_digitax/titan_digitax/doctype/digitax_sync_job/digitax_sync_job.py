@@ -26,6 +26,21 @@ class DigitaxSyncJob(Document):
 	pass
 
 
+PROGRESS_FLUSH_EVERY = 20
+
+
+def _should_flush_progress(idx, total):
+	"""Throttle for the per-record sync loops below: _update_job_record does a
+	frappe.db.exists + set_value + frappe.db.commit() every time it's called, which
+	is fine for status/error updates (rare, and pollers should see them
+	immediately) but not for a plain progress counter ticking once per record -
+	that's ~40k extra queries + 20k commits for a 20k-item catalogue sync, with
+	each commit flushing mid-progress so a crash leaves no clean resume point.
+	Always flushes on the last record so the final state is never stale.
+	"""
+	return idx % PROGRESS_FLUSH_EVERY == 0 or idx == total
+
+
 def _update_job_record(job_id=None, direction=None, sync_type=None, company=None, **fields):
 	"""Create-or-update the job row for job_id. First call for a job_id creates the row
 	(direction/sync_type/company are only used then); every call after that only writes
@@ -116,6 +131,11 @@ def execute_digitax_sync(direction=None, sync_type=None, company=None):
 			see SYNC_TYPES_BY_DIRECTION
 		company: The company whose Digitax Company Settings to sync with
 	"""
+	# Bulk action (an hour-long job, per company or across the catalogue) with no
+	# other caller than this page's own "Execute" button - System Manager only,
+	# same as the other bulk/multi-company Digitax entrypoints.
+	frappe.only_for("System Manager")
+
 	if not direction or direction.strip() == "":
 		frappe.throw("Please select a Direction before executing.")
 
@@ -257,39 +277,73 @@ def sync_invoices_to_digitax(company, job_id=None):
 	except (ValueError, TypeError):
 		retry_count = 5
 
-	from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax
+	# The automatic (unchecked) entrypoint - this runs inside a background job
+	# already gated at execute_digitax_sync (System Manager click to start it),
+	# not a per-invoice interactive send. Using the checked wrapper here would
+	# additionally require whoever clicked Execute to separately hold send_role
+	# too, even though they already passed a stricter gate to get here.
+	from titan_digitax.titan_digitax.utils.sales import DEFAULT_RETRY_BATCH_SIZE, send_sales_invoice_to_digitax_automatic
 
+	try:
+		batch_size = int(settings.get("retry_batch_size") or DEFAULT_RETRY_BATCH_SIZE)
+		if batch_size <= 0:
+			batch_size = DEFAULT_RETRY_BATCH_SIZE
+	except (ValueError, TypeError):
+		batch_size = DEFAULT_RETRY_BATCH_SIZE
+
+	invoice_filters = {
+		"docstatus": 1,
+		"custom_sent_to_digitax": 0,
+		"company": company,
+		"custom_retry_count": ["<", retry_count],
+	}
+
+	# Same reasoning as the hourly retry sweep (F8): an unbounded fetch here risks
+	# one Execute click trying to process an entire backlog in a single job run,
+	# with no resumability if it's interrupted. Reuses the same per-company
+	# retry_batch_size setting rather than inventing a second one - oldest first,
+	# same as the sweep, so which invoices get through first is predictable.
+	backlog_total = frappe.db.count("Sales Invoice", invoice_filters)
 	invoices = frappe.get_all(
 		"Sales Invoice",
-		filters={
-			"docstatus": 1,
-			"custom_sent_to_digitax": 0,
-			"company": company,
-			"custom_retry_count": ["<", retry_count],
-		},
+		filters=invoice_filters,
 		pluck="name",
+		order_by="posting_date asc",
+		limit_page_length=batch_size,
 	)
 
 	total = len(invoices)
+	if backlog_total > total:
+		# No silent truncation - if the backlog is bigger than one batch, say so
+		# up front rather than quietly under-reporting "Attempted" against the
+		# true total. The rest stays picked up by the hourly retry sweep, or the
+		# next manual Execute.
+		found_message = f"Found {total} of {backlog_total} unsent invoice(s) for {company} (batch capped at {batch_size})"
+	else:
+		found_message = f"Found {total} unsent invoice(s) for {company}"
+
 	_update_job_record(
 		job_id=job_id, total_records=total, percentage_complete=20,
-		last_message=f"Found {total} unsent invoice(s) for {company}",
+		last_message=found_message,
 	)
 
 	errors = []
 	for idx, invoice in enumerate(invoices, 1):
 		try:
-			send_sales_invoice_to_digitax(invoice)
+			send_sales_invoice_to_digitax_automatic(invoice)
 		except Exception as e:
 			errors.append(f"{invoice}: {e}")
 
-		percentage = 20 + int((idx / total) * 70) if total else 90
-		_update_job_record(
-			job_id=job_id, processed_records=idx, errors=len(errors),
-			percentage_complete=percentage, last_message=f"Processed {idx}/{total}: {invoice}",
-		)
+		if _should_flush_progress(idx, total):
+			percentage = 20 + int((idx / total) * 70) if total else 90
+			_update_job_record(
+				job_id=job_id, processed_records=idx, errors=len(errors),
+				percentage_complete=percentage, last_message=f"Processed {idx}/{total}: {invoice}",
+			)
 
-	still_unsent = (
+	# The IN-list here is naturally bounded now too, since invoices is capped at
+	# batch_size rather than the whole backlog.
+	still_unsent_in_batch = (
 		frappe.db.count(
 			"Sales Invoice",
 			{"docstatus": 1, "custom_sent_to_digitax": 0, "company": company, "name": ["in", invoices]},
@@ -297,16 +351,20 @@ def sync_invoices_to_digitax(company, job_id=None):
 		if invoices
 		else 0
 	)
-	sent = max(total - still_unsent, 0)
+	sent = max(total - still_unsent_in_batch, 0)
+	not_attempted = max(backlog_total - total, 0)
+	still_unsent_overall = still_unsent_in_batch + not_attempted
 
-	summary = f"Invoices synced to Digitax: Attempted={total}, Sent={sent}, Still Unsent={still_unsent}"
+	summary = f"Invoices synced to Digitax: Attempted={total}, Sent={sent}, Still Unsent={still_unsent_overall}"
+	if not_attempted:
+		summary += f" ({not_attempted} not attempted this run - batch capped at {batch_size})"
 	frappe.logger().info(summary)
 
 	return {
 		"summary": summary,
 		"created": sent,
 		"updated": 0,
-		"skipped": still_unsent,
+		"skipped": still_unsent_overall,
 		"errors": errors,
 	}
 
@@ -571,12 +629,13 @@ def sync_items_from_digitax(company, start_time=None, end_time=None, job_id=None
 			frappe.log_error(frappe.get_traceback(), f"Digitax Item Sync Error - {item_data.get('item_name', 'Unknown')}")
 			errors.append(error_msg)
 
-		percentage = 20 + int((idx / total) * 70) if total else 90
-		_update_job_record(
-			job_id=job_id, processed_records=idx, skipped_records=skipped, errors=len(errors),
-			percentage_complete=percentage,
-			last_message=f"Processed {idx}/{total}: {item_data.get('item_name', 'Unknown')}",
-		)
+		if _should_flush_progress(idx, total):
+			percentage = 20 + int((idx / total) * 70) if total else 90
+			_update_job_record(
+				job_id=job_id, processed_records=idx, skipped_records=skipped, errors=len(errors),
+				percentage_complete=percentage,
+				last_message=f"Processed {idx}/{total}: {item_data.get('item_name', 'Unknown')}",
+			)
 
 	# Commit all changes
 	frappe.db.commit()

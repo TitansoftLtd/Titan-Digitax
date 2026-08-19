@@ -100,7 +100,7 @@ class TestDigitaxCompanyConfig(FrappeTestCase):
 
     def test_other_company_enabled_but_not_queried(self):
         _make_company_settings_doc("Acme Kenya", enabled=1)
-        self.assertFalse(is_digitax_enabled_for_company("Braeburn Nairobi"))
+        self.assertFalse(is_digitax_enabled_for_company("Acme Uganda"))
 
     def test_empty_company_arg_returns_false(self):
         _make_company_settings_doc("Acme Kenya", enabled=1)
@@ -205,8 +205,8 @@ class TestSendInvoiceEligibility(FrappeTestCase):
         mock_doc.custom_error_message = None
         mock_get_doc.return_value = mock_doc
 
-        from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax
-        result = send_sales_invoice_to_digitax("SI-TEST-001")
+        from titan_digitax.titan_digitax.utils.sales import _send_sales_invoice_to_digitax_impl
+        result = _send_sales_invoice_to_digitax_impl("SI-TEST-001")
 
         self.assertTrue(result.get("skipped"))
         mock_post.assert_not_called()
@@ -227,8 +227,8 @@ class TestSendInvoiceEligibility(FrappeTestCase):
         mock_get_doc.return_value = mock_doc
 
         with patch("titan_digitax.titan_digitax.utils.sales.frappe.db.get_value", return_value="Kenya"):
-            from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax
-            result = send_sales_invoice_to_digitax("SI-TEST-002")
+            from titan_digitax.titan_digitax.utils.sales import _send_sales_invoice_to_digitax_impl
+            result = _send_sales_invoice_to_digitax_impl("SI-TEST-002")
 
         self.assertTrue(result.get("skipped"))
         mock_post.assert_not_called()
@@ -284,7 +284,7 @@ class TestSendInvoiceEligibility(FrappeTestCase):
             "titan_digitax.titan_digitax.utils.sales.frappe.db.get_value",
             side_effect=selective_get_value,
         ):
-            from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax
-            send_sales_invoice_to_digitax("SI-RETURN-001")
+            from titan_digitax.titan_digitax.utils.sales import _send_sales_invoice_to_digitax_impl
+            _send_sales_invoice_to_digitax_impl("SI-RETURN-001")
 
         mock_post.assert_called_once()

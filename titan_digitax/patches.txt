@@ -12,3 +12,4 @@ titan_digitax.patches.v1_0.retire_digitax_settings
 titan_digitax.patches.v1_0.force_resync_titan_digitax_sidebar
 titan_digitax.patches.v1_0.migrate_item_digitax_fields_to_digitax_item
 titan_digitax.patches.v1_0.retire_item_digitax_custom_fields
+titan_digitax.patches.v1_0.create_digitax_sync_user

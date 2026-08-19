@@ -35,8 +35,8 @@ def digitax_callback_sales_with_items():
             }
 
         # A token identifies the company the callback was issued for. When present,
-        # the invoice lookup is scoped to that company so a callback for one school
-        # can never land on another school's invoice.
+        # the invoice lookup is scoped to that company so a callback for one company
+        # can never land on another company's invoice.
         from titan_digitax.titan_digitax.utils.company_config import (
             get_company_for_callback_token,
         )
@@ -50,11 +50,19 @@ def digitax_callback_sales_with_items():
         if token_company:
             filters["company"] = token_company
 
-        invoice_name = frappe.db.get_value("Sales Invoice", filters, "name") or (
-            trader_invoice_number
-            if frappe.db.exists("Sales Invoice", trader_invoice_number)
-            else None
-        )
+        invoice_name = frappe.db.get_value("Sales Invoice", filters, "name")
+
+        if not invoice_name:
+            # Fallback: some invoices carry no custom_trader_invoice_number and are
+            # identified by docname directly. When a token identified the company,
+            # this fallback must stay scoped to it too — otherwise a valid token for
+            # one company could be used to address another company's invoice by name.
+            fallback_filters = {"name": trader_invoice_number}
+            if token_company:
+                fallback_filters["company"] = token_company
+            invoice_name = (
+                trader_invoice_number if frappe.db.exists("Sales Invoice", fallback_filters) else None
+            )
 
         if invoice_name:
             doc = frappe.get_doc("Sales Invoice", invoice_name)
@@ -75,6 +83,14 @@ def digitax_callback_sales_with_items():
             )
         except Exception:
             amendment_row = None
+
+        # An amendment row's own doctype carries no company field — it's a child
+        # table on Sales Invoice — so when a token identified the company, verify
+        # the parent invoice actually belongs to it before trusting the match.
+        if amendment_row and token_company:
+            parent_company = frappe.db.get_value("Sales Invoice", amendment_row.parent, "company")
+            if parent_company != token_company:
+                amendment_row = None
 
         if amendment_row:
             frappe.db.set_value(
@@ -113,10 +129,21 @@ def digitax_callback_sales_with_items():
         }
 
     except Exception as e:
+        # An exception here means a validly-addressed callback (we found the
+        # invoice/amendment row) failed to process for an unexpected/likely
+        # transient reason - a save conflict, a DB hiccup, etc. Digitax's docs
+        # don't document a retry policy either way, but responding with a real
+        # HTTP 500 (rather than a 200 with an error body, which looks identical
+        # to success from the caller's side) is the correct signal regardless -
+        # and gives Digitax a chance to retry if it ever does. Contrast with the
+        # "missing data" / "document not found" cases above, which stay 200:
+        # those are bad payloads or genuine mismatches, not transient failures,
+        # so retrying the exact same request would never help.
         frappe.log_error(
             title="Digitax Callback Error",
             message=frappe.get_traceback()
         )
+        frappe.local.response.http_status_code = 500
         return {
             "status": "error",
             "message": str(e)

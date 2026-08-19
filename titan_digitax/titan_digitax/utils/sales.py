@@ -3,18 +3,256 @@ import json
 import requests
 from datetime import datetime, timezone
 from frappe import _
-from frappe.utils import now_datetime
+from frappe.utils import now_datetime, add_to_date
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
 from .company_config import (
     is_digitax_enabled_for_company,
     get_enabled_digitax_companies,
     get_digitax_settings,
+    require_digitax_role,
+    run_as_digitax_sync_user,
 )
 from .sales_items import build_digitax_items_payload
+from .actionable import create_actionable_item
+
+# The exact wording Digitax uses today for "this trader_invoice_number was already
+# filed" on a 409 response. Duplicate-send recovery (skip re-filing, fetch and adopt
+# the existing sale instead of erroring) is keyed off BOTH the 409 status AND this
+# text matching - status alone isn't a safe signal, since 409 could mean a different
+# kind of conflict. If Digitax ever rewords this, matches will silently stop, which
+# is exactly why an unmatched 409 raises a distinct, loud Actionable Item below
+# instead of being treated as a routine send failure.
+DUPLICATE_TRADER_INVOICE_MESSAGE = "trader_invoice_number has already been used"
+
+# How many unsent invoices a single company gets retried per hourly sweep, when
+# Digitax Company Settings.retry_batch_size isn't set. At a typical ~5s per send,
+# 100 invoices takes roughly 8 minutes; a large backlog drains gradually over
+# multiple hourly runs instead of one sweep trying to process everything at once.
+DEFAULT_RETRY_BATCH_SIZE = 100
+
+# Backoff schedule for ordinary per-invoice retries, keyed by custom_retry_count
+# (how many attempts have already failed). retry_count 0 - the very first failure -
+# is retried on the next hourly sweep with no artificial delay, matching the old
+# flat-cadence behavior for a fresh failure. Every attempt after that waits
+# progressively longer, since an invoice still failing after several tries is
+# almost always broken in a way an hourly retry won't fix - retrying it every
+# hour just burns through its retry budget faster without improving the odds.
+# Any retry_count beyond what's listed here is capped at RETRY_BACKOFF_MAX_HOURS.
+RETRY_BACKOFF_SCHEDULE_HOURS = {1: 1, 2: 4}
+RETRY_BACKOFF_MAX_HOURS = 24
+
+# Cache key tracking the currently-running (if any) hourly retry sweep, so a slow
+# sweep can't have a second one start on top of it, and so a sweep that's stopped
+# making progress can be detected and recovered from automatically.
+RETRY_SWEEP_CACHE_KEY = "titan_digitax:retry_sweep_state"
+
+# No per-invoice progress for this long is treated as "the sweep is stuck", not
+# "the sweep is just working through a large batch" - self-heals by letting the
+# next hourly cron start a fresh sweep instead of staying blocked forever.
+RETRY_SWEEP_STALE_MINUTES = 90
+
+# The full (unscoped) hourly sweep keeps pulling and processing further batches -
+# across all companies, lowest retry count first - rather than stopping after one
+# batch, so a large backlog (e.g. a burst upload) drains as fast as Digitax allows
+# within the hour instead of trickling out one small batch per hour. Capped short
+# of a full hour so the next cron firing doesn't overlap it.
+RETRY_SWEEP_MAX_DURATION_MINUTES = 50
+
+# A virtual reversal blanks custom_sale_id and sets custom_digitax_status to
+# "Awaiting Corrected Virtual Sale", expecting the corrected virtual sale to
+# follow immediately. No progress on that for this long is treated as stuck.
+STUCK_AWAITING_SALE_GRACE_MINUTES = 120
+
+# Written to custom_error_message when a stuck reversal is flagged - doubles as
+# the dedup marker so the check doesn't raise a fresh Actionable Item every hour
+# for the same still-stuck invoice.
+STUCK_AWAITING_SALE_MARKER = "Digitax virtual reversal stuck awaiting corrected sale"
+
+
+def _check_stuck_awaiting_corrected_sales():
+    """custom_sent_to_digitax stays 1 through the "awaiting corrected sale" state
+    (see _mark_invoice_awaiting_corrected_sale), which is exactly the field both
+    the retry sweep and the Failed Digitax Invoices report require to be 0 - so
+    an invoice stuck here after a reversal, with no corrected sale ever sent, is
+    invisible to every other monitoring mechanism. KRA holds a full reversal
+    (net zero) while ERPNext still shows the invoice as sent. Runs alongside the
+    hourly retry sweep rather than as its own scheduled job.
+    """
+    stuck_invoices = frappe.get_all(
+        "Sales Invoice",
+        filters={"docstatus": 1, "custom_digitax_status": "Awaiting Corrected Virtual Sale"},
+        fields=["name", "custom_error_message"],
+    )
+
+    for row in stuck_invoices:
+        if row.custom_error_message and STUCK_AWAITING_SALE_MARKER in row.custom_error_message:
+            continue  # already flagged - don't spam a fresh Actionable Item every hour
+
+        last_reversal = frappe.db.get_value(
+            "Digitax Amendment Row",
+            {
+                "parent": row.name,
+                "parenttype": "Sales Invoice",
+                "amendment_type": "Virtual Credit Note",
+                "status": "Sent",
+            },
+            "sent_on",
+            order_by="sent_on desc",
+        )
+        if not last_reversal:
+            continue  # nothing to measure the wait against - shouldn't happen in practice
+
+        stuck_minutes = (now_datetime() - frappe.utils.get_datetime(last_reversal)).total_seconds() / 60
+        if stuck_minutes < STUCK_AWAITING_SALE_GRACE_MINUTES:
+            continue
+
+        hours, minutes = divmod(int(stuck_minutes), 60)
+        error_msg = f"{STUCK_AWAITING_SALE_MARKER} for over {hours}h {minutes}m."
+        frappe.db.set_value("Sales Invoice", row.name, "custom_error_message", error_msg, update_modified=False)
+        create_actionable_item(
+            title=f"Digitax Reversal Stuck Awaiting Corrected Sale: {row.name}",
+            item_type="Digitax Amendment Stuck",
+            description=(
+                f"<p><strong>Sales Invoice:</strong> {row.name} had a virtual reversal sent "
+                f"{last_reversal}, but no corrected virtual sale has followed since.</p>"
+                f"<p>KRA holds a full reversal (net zero) for this invoice, but ERPNext still "
+                f"shows it as sent (custom_sent_to_digitax=1) with no active Digitax sale ID. "
+                f"Neither the hourly retry sweep nor the Failed Digitax Invoices report will "
+                f"surface this on their own, since both require custom_sent_to_digitax=0.</p>"
+            ),
+            action_required="Send the corrected virtual sale for this invoice, or resolve manually if the reversal was intentional",
+            reference_doctype="Sales Invoice",
+            reference_name=row.name,
+            priority="High",
+        )
+
+    frappe.db.commit()
+
+
+def _get_retry_sweep_state():
+    return frappe.cache().get_value(RETRY_SWEEP_CACHE_KEY)
+
+
+def _set_retry_sweep_state(state):
+    frappe.cache().set_value(RETRY_SWEEP_CACHE_KEY, state)
+
+
+def _clear_retry_sweep_state():
+    frappe.cache().delete_value(RETRY_SWEEP_CACHE_KEY)
+
+
+def _touch_retry_sweep_progress():
+    """Record that the running sweep just processed an invoice. A no-op when no
+    sweep state is tracked (e.g. a manual/targeted retry call outside the hourly
+    job) - only the hourly sweep's own state is ever present to update.
+    """
+    state = _get_retry_sweep_state()
+    if not state:
+        return
+    state["last_progress_at"] = now_datetime().isoformat()
+    state["processed"] = (state.get("processed") or 0) + 1
+    _set_retry_sweep_state(state)
+
+
+def _retry_sweep_is_stale(state):
+    last_progress_at = state.get("last_progress_at")
+    if not last_progress_at:
+        return True
+    try:
+        elapsed_minutes = (now_datetime() - frappe.utils.get_datetime(last_progress_at)).total_seconds() / 60
+    except Exception:
+        return True
+    return elapsed_minutes > RETRY_SWEEP_STALE_MINUTES
+
+
+def _write_digitax_response_fields(doc_name, field_mapping, logger, item_title, description_intro):
+    """Write Digitax response fields onto a Sales Invoice one at a time.
+
+    Digitax has already accepted the sale by the time this runs, so a field
+    write failing locally (most likely a response value - e.g. a receipt URL -
+    longer than a Data field's 140-char limit) must never be treated as the send
+    itself having failed, and must never abort the other fields from being
+    saved. Writing one field at a time (rather than one dict-based UPDATE
+    covering all of them) means one oversized value can't block the rest.
+
+    Any failures are recorded as a single Actionable Item rather than raised,
+    since raising here (this runs inside a background job per the async submit
+    path) would otherwise just be a silently failed job with the invoice left
+    stuck: sent at Digitax, but never marked so locally, so every retry would
+    hit the exact same write failure again on the exact same oversized value.
+
+    Returns {field: (value, error)} for any fields that failed - empty if all
+    of them wrote successfully.
+    """
+    failed = {}
+    for field, value in field_mapping.items():
+        try:
+            frappe.db.set_value("Sales Invoice", doc_name, field, value, update_modified=False)
+        except Exception as e:
+            logger.error(f"Failed to save Digitax field {field} on {doc_name}: {e}")
+            failed[field] = (value, str(e))
+
+    if failed:
+        details = "".join(
+            f"<li><strong>{f}</strong>: {err} (value: {str(v)[:200]!r})</li>"
+            for f, (v, err) in failed.items()
+        )
+        frappe.db.set_value(
+            "Sales Invoice",
+            doc_name,
+            "custom_error_message",
+            f"Digitax accepted this sale, but {len(failed)} field(s) of the response could not "
+            f"be saved locally - see the Actionable Item for detail.",
+            update_modified=False,
+        )
+        create_actionable_item(
+            title=item_title,
+            item_type="Digitax Field Write Failed",
+            description=(
+                f"<p>{description_intro}</p>"
+                f"<ul>{details}</ul>"
+                f"<p>The sale is already filed at Digitax/KRA regardless of this. Widen the "
+                f"affected Sales Invoice custom field(s) - they're likely too short for the "
+                f"value Digitax returned - then resolve so this data can be saved.</p>"
+            ),
+            action_required="Widen the affected Sales Invoice custom field(s) so the Digitax response can be saved",
+            reference_doctype="Sales Invoice",
+            reference_name=doc_name,
+            related_data=frappe.as_json({f: str(v) for f, (v, err) in failed.items()}),
+            priority="High",
+        )
+
+    return failed
 
 
 @frappe.whitelist()
 def send_sales_invoice_to_digitax(docname):
+    """Interactive entrypoint (e.g. the "Send to Digitax" button). The initiating
+    user must hold this company's configured send_role; once confirmed, the
+    actual send always runs as the company's Digitax Sync User (see
+    company_config.run_as_digitax_sync_user) so every Digitax write is
+    consistently attributed to that one account.
+    """
+    company = frappe.db.get_value("Sales Invoice", docname, "company")
+    if not company:
+        frappe.throw(_("Sales Invoice {0} not found.").format(docname))
+    require_digitax_role(company, "send_role", "send an invoice to Digitax")
+    return run_as_digitax_sync_user(company, lambda: _send_sales_invoice_to_digitax_impl(docname))
+
+
+def send_sales_invoice_to_digitax_automatic(docname):
+    """Automatic/background entrypoint - on_submit's queued send and the hourly
+    retry sweep call this directly, never the whitelisted wrapper above. These
+    are the system's own pipeline reacting to a legitimate document event, not
+    an arbitrary user action, so there's no human to hold a role - but the work
+    still always runs as the company's Digitax Sync User, same as the manual
+    path, for a consistent actor across every Digitax write.
+    """
+    company = frappe.db.get_value("Sales Invoice", docname, "company")
+    return run_as_digitax_sync_user(company, lambda: _send_sales_invoice_to_digitax_impl(docname))
+
+
+def _send_sales_invoice_to_digitax_impl(docname):
     if not frappe.conf.get("sync_with_digitax"):
         return {
             "skipped": True,
@@ -68,6 +306,14 @@ def send_sales_invoice_to_digitax(docname):
         current_retry_count = doc.custom_retry_count or 0
         logger.info(f"Retry detected: Current retry count = {current_retry_count}")
         frappe.db.set_value("Sales Invoice", doc.name, "custom_retry_count", current_retry_count + 1, update_modified=False)
+
+    # Stamp every genuine attempt (first send or retry) regardless of outcome, so the
+    # hourly retry sweep can back off between attempts on a failing invoice instead of
+    # hammering it every hour - see RETRY_BACKOFF_SCHEDULE_HOURS in
+    # retry_sending_sales_invoice_to_digitax.
+    frappe.db.set_value(
+        "Sales Invoice", doc.name, "custom_last_digitax_attempt_at", now_datetime(), update_modified=False
+    )
 
     endpoint = ""
     # Get invoice status codes from settings
@@ -156,29 +402,38 @@ def send_sales_invoice_to_digitax(docname):
         logger.info(f"SUCCESS: Invoice sent successfully to Digitax")
         logger.info(f"Sale ID: {response_data.get('id')}, Status: {response_data.get('status')}")
 
-        frappe.db.set_value(
-            "Sales Invoice",
+        failed_fields = _write_digitax_response_fields(
             doc.name,
             {
+                "custom_sent_to_digitax": 1,
+                "custom_sale_id": response_data.get("id", ""),
                 "custom_offline_url": response_data.get("offline_url", ""),
                 "custom_sale_detail_url": response_data.get("sale_detail_url", ""),
                 "custom_serial_number": response_data.get("serial_number", ""),
                 "custom_invoice_number": response_data.get("invoice_number", ""),
                 "custom_digitax_status": response_data.get("status", ""),
-                "custom_sale_id": response_data.get("id", ""),
                 "custom_date": response_data.get("date", ""),
                 "custom_time": response_data.get("time", ""),
                 "custom_receipt_type_code": response_data.get("receipt_type_code", ""),
                 "custom_original_sale_id": response_data.get("original_sale_id", ""),
-                "custom_sent_to_digitax": 1,
+                "custom_error_message": "",
             },
-            update_modified=False,
+            logger,
+            item_title=f"Digitax Response Too Long To Save: {doc.name}",
+            description_intro=(
+                f"<strong>Sales Invoice:</strong> {doc.name} was successfully sent to Digitax "
+                f"(sale accepted), but part of the response could not be saved locally."
+            ),
         )
-        logger.info(f"Invoice fields updated in ERPNext")
+        logger.info(
+            f"Invoice fields updated in ERPNext"
+            + (f" - {len(failed_fields)} field(s) failed to save, see Actionable Item" if failed_fields else "")
+        )
     elif status_code == 409:
-        error_message = response_data.get("message", "").lower()
-        logger.info(f"409 Conflict received. Message: {response_data.get('message', '')}")
-        is_duplicate = "trader_invoice_number has already been used" in error_message
+        raw_message = response_data.get("message", "")
+        error_message = raw_message.lower()
+        logger.info(f"409 Conflict received. Message: {raw_message}")
+        is_duplicate = DUPLICATE_TRADER_INVOICE_MESSAGE in error_message
 
         if is_duplicate:
             logger.info(f"DUPLICATE DETECTED: Invoice already exists in Digitax (409)")
@@ -186,17 +441,49 @@ def send_sales_invoice_to_digitax(docname):
             existing_sale_id = metadata.get("existing_sale_id", "")
             trader_invoice_number = metadata.get("trader_invoice_number", "")
             logger.info(f"Existing Sale ID: {existing_sale_id}, Trader Invoice Number: {trader_invoice_number}")
-            response_data = update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger)
+            response_data = update_invoice_with_existing_digitax_sale(
+                doc, existing_sale_id, logger, expected_payload=payload
+            )
         else:
-            logger.error(f"409 Conflict (NOT duplicate): {response_data.get('message', 'Unknown conflict')}")
+            # A 409 we can't positively identify as "trader_invoice_number already
+            # used". It's treated as a normal send failure (error saved, retried on
+            # the usual hourly cadence up to this company's max_retry_attempts) - but
+            # unlike other failures, it's also raised as its own loud Actionable Item.
+            # A 409 on this endpoint has really only ever meant one thing, so this is
+            # most likely Digitax having reworded that exact message; someone needs to
+            # confirm that against the raw response below and update
+            # DUPLICATE_TRADER_INVOICE_MESSAGE accordingly - silently falling back to
+            # "just another error" would let this go unnoticed indefinitely.
+            logger.error(f"409 Conflict (unrecognized message): {raw_message or 'Unknown conflict'}")
             frappe.db.set_value(
                 "Sales Invoice",
                 doc.name,
                 "custom_error_message",
-                response_data.get("message", "Conflict error (409)"),
+                raw_message or "Conflict error (409)",
                 update_modified=False,
             )
-            logger.info(f"Error message saved to invoice")
+            create_actionable_item(
+                title=f"Unrecognized Digitax 409 Conflict: {doc.name}",
+                item_type="Digitax Conflict Not Recognized",
+                description=(
+                    f"<p><strong>Sales Invoice:</strong> {doc.name} got a 409 Conflict from "
+                    f"Digitax whose message did not match the known "
+                    f"\"{DUPLICATE_TRADER_INVOICE_MESSAGE}\" wording.</p>"
+                    f"<p><strong>Raw message:</strong> {raw_message or '(empty)'}</p>"
+                    f"<p>This has so far always meant the trader invoice number was already "
+                    f"filed - if that's still true here, Digitax likely changed the wording "
+                    f"and <code>DUPLICATE_TRADER_INVOICE_MESSAGE</code> in "
+                    f"<code>titan_digitax/utils/sales.py</code> needs updating to match, or "
+                    f"duplicate sends will keep failing to be recognized. The invoice will "
+                    f"keep retrying hourly up to the configured retry limit in the meantime.</p>"
+                ),
+                action_required="Check the raw 409 message above against Digitax's current API docs/behaviour and update the code if the wording changed",
+                reference_doctype="Sales Invoice",
+                reference_name=doc.name,
+                related_data=frappe.as_json({"status_code": status_code, "response": response_data}),
+                priority="High",
+            )
+            logger.info(f"Error message saved to invoice; Actionable Item raised")
     else:
         error_msg = response_data.get("message", "Unknown error")
         logger.error(f"API ERROR: Status {status_code}, Message: {error_msg}")
@@ -211,8 +498,51 @@ def send_sales_invoice_to_digitax(docname):
     logger.info(f"=" * 80)
     return response_data
 
+def _backoff_hours_for_retry_count(retry_count):
+    if retry_count <= 0:
+        return 0
+    return RETRY_BACKOFF_SCHEDULE_HOURS.get(retry_count, RETRY_BACKOFF_MAX_HOURS)
+
+
+def _raise_retry_budget_exhausted_actionable_item(invoice_name, company, retry_count, max_retry_attempts):
+    # No dedup marker needed: the sweep's own query filter (custom_retry_count <
+    # max_retry_attempts) means an invoice crosses this threshold exactly once - once
+    # custom_retry_count reaches max_retry_attempts it drops out of every future
+    # sweep's query entirely, so this can never fire twice for the same invoice unless
+    # someone resets custom_retry_count (a deliberate re-enable, which should raise
+    # again). create_actionable_item's own dedup-by-title/type/reference is still the
+    # backstop if that assumption is ever wrong.
+    create_actionable_item(
+        title=f"Digitax Retry Budget Exhausted: {invoice_name}",
+        item_type="Digitax Retry Exhausted",
+        description=(
+            f"<p><strong>Sales Invoice:</strong> {invoice_name} has failed to send to Digitax "
+            f"{retry_count} time(s), reaching this company's max_retry_attempts "
+            f"({max_retry_attempts}). The hourly retry sweep will no longer pick it up - its "
+            f"custom_retry_count ({retry_count}) no longer satisfies the sweep's own "
+            f"custom_retry_count &lt; max_retry_attempts filter.</p>"
+            f"<p>See custom_error_message on the invoice for the last failure reason.</p>"
+        ),
+        action_required=(
+            "Investigate and resolve the underlying failure, then reset custom_retry_count "
+            "(or raise max_retry_attempts) to re-enter the retry sweep"
+        ),
+        reference_doctype="Sales Invoice",
+        reference_name=invoice_name,
+        company=company,
+        priority="High",
+    )
+
+
 @frappe.whitelist()
 def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from_date=None, to_date=None, retry_count=None):
+    # This is a bulk action spanning potentially every company - not scoped to
+    # one company's send_role, so it's gated at the site level instead. The only
+    # production caller is job_retry_sending_sales_invoices's own enqueue, which
+    # already runs as Administrator (the scheduler's own identity) and passes
+    # this trivially; this check only bites a direct/manual API call.
+    frappe.only_for("System Manager")
+
     # Every setting (target country, max retries) is per company now, so each company's
     # invoices are queried separately using that company's own values rather than one
     # combined query spanning every enabled company.
@@ -221,45 +551,134 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
     attempted = 0
     errors = []
 
-    for comp in companies:
-        if not is_digitax_enabled_for_company(comp):
-            continue
+    # Invoices already attempted THIS run, across every batch/round/company -
+    # excluded from every subsequent query so nothing is attempted twice within
+    # the same sweep, even if it's still eligible by retry_count. A fresh burst of
+    # unsent invoices deserves a first attempt each before any of them gets a
+    # second - that's what keeps one systemically-failing batch from burning
+    # through its whole retry budget in a single hour instead of spreading
+    # attempts across separate hourly sweeps.
+    attempted_this_run = set()
 
-        settings = get_digitax_settings(comp)
-        target_country = settings.get("target_country") or "Kenya"
-        company_country = frappe.db.get_value("Company", comp, "country")
-        if company_country != target_country:
-            continue
+    # Only the real unscoped hourly sweep (no targeting args at all) keeps looping
+    # for more batches once the first round is done - a manual/targeted call
+    # (specific invoice, company, or date range) does exactly what was asked and
+    # returns, it was never meant to run for up to an hour.
+    is_full_sweep = not any([invoice_name, company, from_date, to_date])
+    sweep_deadline = (
+        add_to_date(now_datetime(), minutes=RETRY_SWEEP_MAX_DURATION_MINUTES) if is_full_sweep else None
+    )
 
-        if retry_count is None:
-            try:
-                comp_retry_count = int(settings.get("max_retry_attempts") or 5)
-                if comp_retry_count <= 0:
-                    comp_retry_count = 5  # Fallback to default if invalid
-            except (ValueError, TypeError):
-                comp_retry_count = 5  # Fallback if conversion fails
-        else:
-            comp_retry_count = retry_count
+    # This function is what the hourly sweep's tracked job actually runs. Whether
+    # it finishes cleanly or something below raises past the per-invoice
+    # try/except, the tracked sweep is over either way - clear it in a finally so
+    # the next hourly run doesn't wait out the staleness window unnecessarily.
+    try:
+        while True:
+            found_any_this_round = False
 
-        filters = {
-            "docstatus": 1,
-            "custom_sent_to_digitax": 0,
-            "company": comp,
-            "custom_retry_count": ["<", comp_retry_count],
-        }
-        if invoice_name:
-            filters["name"] = invoice_name
-        if from_date and to_date:
-            filters["posting_date"] = ["between", [from_date, to_date]]
+            for comp in companies:
+                if not is_digitax_enabled_for_company(comp):
+                    continue
 
-        invoices = frappe.get_all("Sales Invoice", filters=filters, pluck="name")
-        attempted += len(invoices)
+                settings = get_digitax_settings(comp)
+                target_country = settings.get("target_country") or "Kenya"
+                company_country = frappe.db.get_value("Company", comp, "country")
+                if company_country != target_country:
+                    continue
 
-        for invoice in invoices:
-            try:
-                send_sales_invoice_to_digitax(invoice)
-            except Exception as e:
-                errors.append(f"{invoice}: {e}")
+                if retry_count is None:
+                    try:
+                        comp_retry_count = int(settings.get("max_retry_attempts") or 5)
+                        if comp_retry_count <= 0:
+                            comp_retry_count = 5  # Fallback to default if invalid
+                    except (ValueError, TypeError):
+                        comp_retry_count = 5  # Fallback if conversion fails
+                else:
+                    comp_retry_count = retry_count
+
+                try:
+                    comp_batch_size = int(settings.get("retry_batch_size") or DEFAULT_RETRY_BATCH_SIZE)
+                    if comp_batch_size <= 0:
+                        comp_batch_size = DEFAULT_RETRY_BATCH_SIZE
+                except (ValueError, TypeError):
+                    comp_batch_size = DEFAULT_RETRY_BATCH_SIZE
+
+                filters = {
+                    "docstatus": 1,
+                    "custom_sent_to_digitax": 0,
+                    "company": comp,
+                    "custom_retry_count": ["<", comp_retry_count],
+                }
+                if from_date and to_date:
+                    filters["posting_date"] = ["between", [from_date, to_date]]
+                if invoice_name:
+                    # A specific target always wins - never widened into an
+                    # exclusion-list search, regardless of what's been attempted
+                    # elsewhere this run.
+                    filters["name"] = invoice_name
+                elif attempted_this_run:
+                    filters["name"] = ["not in", list(attempted_this_run)]
+
+                # Lowest retry count first (spread attempts across the backlog
+                # rather than hammering the same invoices), oldest posting date
+                # as the tiebreaker, capped per company per round.
+                invoices = frappe.get_all(
+                    "Sales Invoice",
+                    filters=filters,
+                    fields=["name", "custom_retry_count", "custom_last_digitax_attempt_at"],
+                    order_by="custom_retry_count asc, posting_date asc",
+                    limit_page_length=comp_batch_size,
+                )
+                if invoices:
+                    found_any_this_round = True
+
+                # Every fetched invoice counts as attempted-this-run even if the backoff
+                # check below skips it - it won't clear its backoff window within this
+                # sweep's short lifetime anyway, so without this the same skipped invoice
+                # would be re-fetched (and re-skipped) every round, looping until the
+                # sweep's time budget ran out instead of moving on to the rest of the
+                # backlog.
+                attempted_this_run.update(row.name for row in invoices)
+
+                now = now_datetime()
+                due_invoices = []
+                for row in invoices:
+                    backoff_hours = _backoff_hours_for_retry_count(row.custom_retry_count or 0)
+                    if backoff_hours and row.custom_last_digitax_attempt_at:
+                        next_eligible_at = add_to_date(row.custom_last_digitax_attempt_at, hours=backoff_hours)
+                        if now < next_eligible_at:
+                            continue  # still inside this retry's backoff window - try again next sweep
+                    due_invoices.append(row.name)
+
+                attempted += len(due_invoices)
+
+                for invoice in due_invoices:
+                    try:
+                        send_sales_invoice_to_digitax_automatic(invoice)
+                    except Exception as e:
+                        errors.append(f"{invoice}: {e}")
+                    finally:
+                        _touch_retry_sweep_progress()
+
+                    sent, invoice_retry_count = frappe.db.get_value(
+                        "Sales Invoice", invoice, ["custom_sent_to_digitax", "custom_retry_count"]
+                    )
+                    if not sent and (invoice_retry_count or 0) >= comp_retry_count:
+                        _raise_retry_budget_exhausted_actionable_item(
+                            invoice, comp, invoice_retry_count, comp_retry_count
+                        )
+
+            if not is_full_sweep:
+                break  # targeted call - exactly one pass, as before
+
+            if not found_any_this_round:
+                break  # nothing left to attempt this sweep
+
+            if sweep_deadline and now_datetime() >= sweep_deadline:
+                break  # time budget used up - whatever's left is picked up next hour
+    finally:
+        _clear_retry_sweep_state()
 
     # Re-query rather than trust each call's return shape (send_sales_invoice_to_digitax
     # returns different dict shapes for skip/error/success) — the field itself is the
@@ -281,16 +700,71 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
 
 @frappe.whitelist()
 def job_retry_sending_sales_invoices():
+    # The hourly cron calls this directly and always runs as Administrator (the
+    # scheduler's own identity), which trivially satisfies this - it only bites a
+    # direct/manual call by someone who isn't a System Manager. Bulk/multi-company
+    # action, not scoped to any one company's send_role.
+    frappe.only_for("System Manager")
+
     if not frappe.conf.get("sync_with_digitax"):
         frappe.msgprint("Digitax sync is disabled in site configuration")
         return {
             "skipped": True,
             "reason": "Digitax sync is disabled in site configuration"
         }
-    
-    # Size the job for the slowest-configured enabled company, since this one job
-    # retries invoices across every company in a single sweep.
-    job_timeout = 600
+
+    # Independent of whether a sweep actually starts below (it may be skipped if
+    # a previous one is still running) - a stuck reversal isn't affected by that
+    # either way, so check every time this fires.
+    _check_stuck_awaiting_corrected_sales()
+
+    existing_state = _get_retry_sweep_state()
+    if existing_state:
+        if not _retry_sweep_is_stale(existing_state):
+            # A previous sweep is still making progress - don't start a second one
+            # on top of it (two sweeps could both pick up and resend the same
+            # invoice concurrently). It'll get picked up again next hour if it's
+            # still unsent by then.
+            frappe.logger("digitax_integration").info(
+                f"Skipping retry sweep - previous sweep (job {existing_state.get('job_id')}) "
+                f"still in progress, {existing_state.get('processed', 0)} invoice(s) processed so far."
+            )
+            return {"skipped": True, "reason": "A previous retry sweep is still in progress"}
+
+        # No progress in over RETRY_SWEEP_STALE_MINUTES - the previous sweep is
+        # presumed stuck (hung request, crashed worker that never reached the
+        # finally block, etc). Flag it for a human to check, and self-heal by
+        # clearing the state so this run isn't blocked waiting on a job that may
+        # never finish.
+        frappe.logger("digitax_integration").warning(
+            f"Previous Digitax retry sweep (job {existing_state.get('job_id')}) appears stuck - "
+            f"no progress in over {RETRY_SWEEP_STALE_MINUTES} minutes. Starting a fresh sweep."
+        )
+        create_actionable_item(
+            title="Digitax Retry Sweep Appears Stuck",
+            item_type="Digitax Sweep Stalled",
+            description=(
+                f"<p>The hourly Digitax retry sweep (background job "
+                f"<code>{existing_state.get('job_id')}</code>, started "
+                f"{existing_state.get('started_at')}) has not made progress in over "
+                f"{RETRY_SWEEP_STALE_MINUTES} minutes - {existing_state.get('processed', 0)} "
+                f"invoice(s) were processed before it stalled.</p>"
+                f"<p>A new sweep has been started automatically so retries aren't blocked "
+                f"indefinitely. If the old job is still actually running (check Background "
+                f"Jobs in Desk), stop it manually to free up worker capacity - calling "
+                f"<code>stop_digitax_retry_sweep</code> does this for you.</p>"
+            ),
+            action_required="Check Background Jobs for the stuck job and stop it if it's still running",
+            priority="High",
+        )
+        _clear_retry_sweep_state()
+
+    # This job now keeps looping for further batches for up to
+    # RETRY_SWEEP_MAX_DURATION_MINUTES, so its own hard timeout must cover that
+    # whole span (plus a wrap-up margin) - not just one company's configured
+    # per-batch timeout. Still take the max against any company's
+    # background_job_timeout in case it's deliberately set higher than that.
+    job_timeout = RETRY_SWEEP_MAX_DURATION_MINUTES * 60 + 300
     for comp in get_enabled_digitax_companies():
         settings = get_digitax_settings(comp)
         try:
@@ -300,11 +774,55 @@ def job_retry_sending_sales_invoices():
         except (ValueError, TypeError):
             pass
 
-    frappe.enqueue(
+    job = frappe.enqueue(
         retry_sending_sales_invoice_to_digitax,
         queue="default",
         timeout=job_timeout,
     )
+
+    job_id = getattr(job, "id", None)
+    _set_retry_sweep_state({
+        "job_id": job_id,
+        "started_at": now_datetime().isoformat(),
+        "last_progress_at": now_datetime().isoformat(),
+        "processed": 0,
+    })
+
+    return {"enqueued": True, "job_id": job_id}
+
+
+@frappe.whitelist()
+def stop_digitax_retry_sweep():
+    """Manually stop a running Digitax retry sweep and immediately free it up for
+    the next hourly run, instead of waiting out the staleness timeout. Restricted
+    to System Manager since it can send a stop signal to a background job.
+    """
+    frappe.only_for("System Manager")
+
+    state = _get_retry_sweep_state()
+    if not state:
+        return {"stopped": False, "message": "No retry sweep is currently tracked as running."}
+
+    job_id = state.get("job_id")
+    stop_result = "not attempted (no job id was recorded)"
+    if job_id:
+        try:
+            from frappe.core.doctype.rq_job.rq_job import stop_job
+
+            stop_job(job_id)
+            stop_result = "stop signal sent"
+        except Exception as e:
+            stop_result = f"failed to send stop signal: {e}"
+
+    _clear_retry_sweep_state()
+    return {
+        "stopped": True,
+        "job_id": job_id,
+        "stop_result": stop_result,
+        "message": "Sweep state cleared - the next hourly run will start a fresh sweep regardless "
+        "of whether the stop signal actually reached a running job.",
+    }
+
 
 def fetch_sale_details_from_digitax(sale_id, company):
     """
@@ -366,120 +884,174 @@ def fetch_sale_details_from_digitax(sale_id, company):
         return None
 
 
-def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger):
+def _reconcile_fetched_sale(expected_payload, sale_details):
+    """Compare a sale fetched from Digitax against what this invoice would have sent.
+
+    A 409 "already used" only proves the trader_invoice_number collided - it does not
+    prove the sale Digitax already holds is actually THIS invoice's sale (vs a stale ID,
+    a different invoice, or a Digitax-side data issue). Before adopting the fetched
+    sale's data as this invoice's own, verify the fetched sale's trader_invoice_number,
+    customer TIN (when we have one) and total amount all agree with what we tried to
+    send. Returns a list of human-readable mismatch descriptions - empty means it's safe
+    to accept.
+    """
+    mismatches = []
+    if not expected_payload:
+        return mismatches
+
+    expected_trader = expected_payload.get("trader_invoice_number")
+    fetched_trader = sale_details.get("trader_invoice_number")
+    if expected_trader and fetched_trader and str(expected_trader) != str(fetched_trader):
+        mismatches.append(
+            f"trader_invoice_number: expected {expected_trader!r}, Digitax has {fetched_trader!r}"
+        )
+
+    expected_tin = expected_payload.get("customer_tin")
+    fetched_tin = sale_details.get("customer_tin")
+    if expected_tin and fetched_tin and str(expected_tin) != str(fetched_tin):
+        mismatches.append(
+            f"customer_tin: expected {expected_tin!r}, Digitax has {fetched_tin!r}"
+        )
+
+    expected_items = expected_payload.get("items") or []
+    if expected_items:
+        expected_total = sum(float(item.get("total_amount") or 0) for item in expected_items)
+        fetched_total = sum(
+            float(item.get("total_amount") or 0) for item in (sale_details.get("item_list") or [])
+        )
+        # Small tolerance for per-line rounding, scaled to line count rather than a
+        # single flat value that would be too tight for a large invoice.
+        tolerance = max(1.0, 0.02 * len(expected_items))
+        if abs(fetched_total - expected_total) > tolerance:
+            mismatches.append(
+                f"total amount: expected {expected_total:.2f}, Digitax has {fetched_total:.2f} "
+                f"(tolerance {tolerance:.2f})"
+            )
+
+    return mismatches
+
+
+def _block_unverified_duplicate(doc, logger, reason, details):
+    """A 409 was recognized as 'trader_invoice_number already used', but we could not
+    verify (or could not even fetch) the sale Digitax says already exists. Refuse to
+    guess - leave the invoice unsent, record why, and raise a loud Actionable Item so a
+    human resolves it rather than the invoice being silently marked filed on faith.
+    """
+    logger.error(f"Refusing to mark {doc.name} as sent: {reason}")
+    error_msg = f"Digitax reported a duplicate trader_invoice_number, but {reason}."
+    frappe.db.set_value(
+        "Sales Invoice", doc.name, "custom_error_message", error_msg, update_modified=False
+    )
+    create_actionable_item(
+        title=f"Digitax Duplicate Not Verified: {doc.name}",
+        item_type="Digitax Duplicate Verification Failed",
+        description=(
+            f"<p><strong>Sales Invoice:</strong> {doc.name} got a 409 'trader_invoice_number "
+            f"already used' from Digitax, but the existing sale could not be verified as "
+            f"actually belonging to this invoice.</p>"
+            f"<p><strong>Reason:</strong> {reason}</p>"
+            f"<p>{details}</p>"
+            f"<p>This invoice has been left as NOT sent so it isn't wrongly marked filed. "
+            f"Check the sale in Digitax directly and either link it manually or resolve the "
+            f"mismatch before retrying.</p>"
+        ),
+        action_required="Verify the existing Digitax sale against this invoice and resolve manually",
+        reference_doctype="Sales Invoice",
+        reference_name=doc.name,
+        priority="High",
+    )
+    return {"success": False, "already_exists": True, "verified": False, "message": error_msg}
+
+
+def update_invoice_with_existing_digitax_sale(doc, existing_sale_id, logger, expected_payload=None):
     """
     Update Sales Invoice fields when a duplicate is detected in Digitax.
-    Fetches full sale details and populates all Digitax custom fields.
-    Only updates fields if they are empty or values don't match.
-    
+    Fetches full sale details, reconciles them against what this invoice would have
+    sent (see _reconcile_fetched_sale), and only then populates the Digitax custom
+    fields. Only updates fields if they are empty or values don't match.
+
     Args:
         doc: Sales Invoice document
         existing_sale_id (str): The existing sale ID from Digitax
         logger: Logger instance
-        
+        expected_payload (dict): The payload this invoice would have sent (trader
+            invoice number, customer TIN, items) - used to verify the fetched sale is
+            actually this invoice's sale before trusting it.
+
     Returns:
         dict: Response data with success status and sale details
     """
     response_data = {}
-    
-    # Helper function to update field only if value changed
-    def update_field_if_changed(doctype, docname, fieldname, new_value):
-        current_value = frappe.db.get_value(doctype, docname, fieldname)
-        # Convert None to empty string for comparison
-        current_value = current_value if current_value is not None else ""
-        new_value = new_value if new_value is not None else ""
-        
-        # Only update if values are different
-        if str(current_value) != str(new_value):
-            frappe.db.set_value(doctype, docname, fieldname, new_value, update_modified=False)
-            return True
-        return False
-    
+
     if existing_sale_id:
         logger.info(f"Fetching full sale details for existing sale_id: {existing_sale_id}")
         sale_details = fetch_sale_details_from_digitax(existing_sale_id, doc.company)
         
         if sale_details:
-            # Update all Digitax fields with fetched data (only if changed)
+            mismatches = _reconcile_fetched_sale(expected_payload, sale_details)
+            if mismatches:
+                return _block_unverified_duplicate(
+                    doc,
+                    logger,
+                    reason="the fetched sale does not match this invoice",
+                    details="<ul>" + "".join(f"<li>{m}</li>" for m in mismatches) + "</ul>",
+                )
+
+            # Update all Digitax fields with fetched data
             logger.info(f"Checking and updating invoice fields with Digitax details")
-            
-            updated_fields = []
-            
-            # Map of field names to values from Digitax
-            field_mapping = {
-                "custom_offline_url": sale_details.get("offline_url", ""),
-                "custom_sale_detail_url": sale_details.get("sale_detail_url", ""),
-                "custom_serial_number": sale_details.get("serial_number", ""),
-                "custom_invoice_number": sale_details.get("invoice_number", ""),
-                "custom_digitax_status": sale_details.get("status", ""),
-                "custom_sale_id": sale_details.get("id", ""),
-                "custom_date": sale_details.get("date", ""),
-                "custom_time": sale_details.get("time", ""),
-                "custom_receipt_type_code": sale_details.get("receipt_type_code", ""),
-                "custom_original_sale_id": sale_details.get("original_sale_id", ""),
-                "custom_sent_to_digitax": 1,
-                "custom_error_message": "",
-            }
-            
-            # Update each field only if value changed
-            for field, value in field_mapping.items():
-                if update_field_if_changed("Sales Invoice", doc.name, field, value):
-                    updated_fields.append(field)
-            
-            if updated_fields:
-                logger.info(f"Updated fields: {', '.join(updated_fields)}")
+
+            failed_fields = _write_digitax_response_fields(
+                doc.name,
+                {
+                    "custom_sent_to_digitax": 1,
+                    "custom_sale_id": sale_details.get("id", ""),
+                    "custom_offline_url": sale_details.get("offline_url", ""),
+                    "custom_sale_detail_url": sale_details.get("sale_detail_url", ""),
+                    "custom_serial_number": sale_details.get("serial_number", ""),
+                    "custom_invoice_number": sale_details.get("invoice_number", ""),
+                    "custom_digitax_status": sale_details.get("status", ""),
+                    "custom_date": sale_details.get("date", ""),
+                    "custom_time": sale_details.get("time", ""),
+                    "custom_receipt_type_code": sale_details.get("receipt_type_code", ""),
+                    "custom_original_sale_id": sale_details.get("original_sale_id", ""),
+                    "custom_error_message": "",
+                },
+                logger,
+                item_title=f"Digitax Response Too Long To Save: {doc.name}",
+                description_intro=(
+                    f"<strong>Sales Invoice:</strong> {doc.name} matched a duplicate sale already "
+                    f"filed at Digitax (verified), but part of the response could not be saved "
+                    f"locally."
+                ),
+            )
+            if failed_fields:
+                logger.info(f"{len(failed_fields)} field(s) failed to save, see Actionable Item")
             else:
-                logger.info(f"All fields already up to date, no changes needed")
-            
+                logger.info(f"All fields updated")
+
             # Update response_data with fetched details
             response_data = sale_details.copy()
             response_data["success"] = True
             response_data["already_exists"] = True
         else:
-            # Failed to fetch details, just mark as sent with basic info
-            logger.warning(f"Could not fetch full sale details, updating with basic info only")
-            
-            updated_fields = []
-            basic_fields = {
-                "custom_sent_to_digitax": 1,
-                "custom_error_message": "",
-                "custom_digitax_status": "Already Exists",
-                "custom_sale_id": existing_sale_id,
-            }
-            
-            for field, value in basic_fields.items():
-                if update_field_if_changed("Sales Invoice", doc.name, field, value):
-                    updated_fields.append(field)
-            
-            if updated_fields:
-                logger.info(f"Updated fields: {', '.join(updated_fields)}")
-            
-            response_data["success"] = True
-            response_data["already_exists"] = True
-            response_data["id"] = existing_sale_id
-            response_data["status"] = "Already Exists"
+            # Could not fetch the sale Digitax says exists - no data to reconcile
+            # against, so there is nothing to verify this really is this invoice's
+            # sale. Do not guess.
+            return _block_unverified_duplicate(
+                doc,
+                logger,
+                reason=f"the existing sale ({existing_sale_id}) could not be fetched from Digitax to verify",
+                details="Fetching sale details failed - see the Digitax integration log for the underlying error.",
+            )
     else:
-        # No sale_id in metadata, just mark as sent
-        logger.warning(f"No existing_sale_id in metadata, marking as sent without full details")
-        
-        updated_fields = []
-        basic_fields = {
-            "custom_sent_to_digitax": 1,
-            "custom_error_message": "",
-            "custom_digitax_status": "Already Exists",
-        }
-        
-        for field, value in basic_fields.items():
-            if update_field_if_changed("Sales Invoice", doc.name, field, value):
-                updated_fields.append(field)
-        
-        if updated_fields:
-            logger.info(f"Updated fields: {', '.join(updated_fields)}")
-        
-        response_data["success"] = True
-        response_data["already_exists"] = True
-        response_data["status"] = "Already Exists"
-    
+        # No sale_id in metadata at all - nothing to fetch, nothing to verify.
+        return _block_unverified_duplicate(
+            doc,
+            logger,
+            reason="Digitax's response included no existing_sale_id to verify against",
+            details="Without a sale ID there is no way to confirm which sale this invoice was matched to.",
+        )
+
     logger.info(f"Invoice marked as synced (already exists in Digitax)")
     return response_data
 
@@ -488,8 +1060,8 @@ def resolve_digitax_customer_pin(doc):
     """
     Resolve the customer PIN for Digitax payloads.
 
-    Parent is the operational source in Braeburn, while Customer and Sales
-    Invoice are retained as fallbacks for older data.
+    Parent is the primary operational source for this pin, while Customer and
+    Sales Invoice are retained as fallbacks for older data.
     """
     parent_code = getattr(doc, "parent_code", None)
     if parent_code:
@@ -573,30 +1145,6 @@ def _get_digitax_headers(company=None):
 
 def _get_trader_invoice_base(doc):
     return str(doc.custom_trader_invoice_number or (doc.name.replace("/", "_") if doc.name else ""))
-
-
-def _get_default_digitax_item(doc, digitax_settings, include_sale_fields):
-    amount = abs(doc.grand_total)
-    item = {
-        "item_bar_code": digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES",
-        "quantity": 1,
-        "unit_price": amount,
-        "total_amount": amount,
-        "package_unit_quantity": amount,
-        "discount_rate": 0,
-        "discount_amount": 0,
-        "item_description": digitax_settings.get("default_item_description") or "School Fees",
-    }
-
-    if include_sale_fields:
-        item.update({
-            "item_name": digitax_settings.get("default_item_name") or "School Fees",
-            "item_class_code": digitax_settings.get("default_item_class_code") or "99020000",
-            "item_tax_type_code": digitax_settings.get("default_item_tax_type_code") or "D",
-            "is_stockable": bool(digitax_settings.get("default_is_stockable")),
-        })
-
-    return item
 
 
 def _get_digitax_correction_date():
@@ -707,8 +1255,69 @@ def _validate_virtual_amendment_invoice(doc):
     if not doc.custom_sent_to_digitax and not doc.custom_sale_id:
         frappe.throw(_("This Sales Invoice has not been sent to Digitax yet."))
 
+    existing_credit_note = frappe.db.get_value(
+        "Sales Invoice",
+        {"is_return": 1, "return_against": doc.name, "docstatus": 1},
+        "name",
+    )
+    if existing_credit_note:
+        frappe.throw(
+            _(
+                "A Credit Note ({0}) already exists against this invoice. Virtual amendments and "
+                "Credit Notes both correct a filed sale - use one or the other, not both."
+            ).format(frappe.bold(existing_credit_note))
+        )
+
+
+def has_active_virtual_amendments(invoice_name):
+    """True when a Sent Virtual Sale/Virtual Credit Note row exists against this
+    invoice - i.e. a virtual amendment flow has already been started for it.
+    The "Original Sale" row is excluded: it just records the initial filing, it
+    isn't itself an amendment.
+    """
+    return bool(
+        frappe.db.exists(
+            "Digitax Amendment Row",
+            {
+                "parent": invoice_name,
+                "parenttype": "Sales Invoice",
+                "amendment_type": ["in", ["Virtual Sale", "Virtual Credit Note"]],
+                "status": "Sent",
+            },
+        )
+    )
+
+
+def validate_credit_note_against_active_amendments(doc, method=None):
+    """Sales Invoice `validate` hook. Virtual amendments and Credit Notes both
+    correct an already-filed sale - allowing both against the same invoice would
+    let two independent corrections race each other at Digitax/KRA. Block a
+    Credit Note from being created while a virtual amendment is in progress.
+    """
+    if not doc.is_return or not doc.return_against:
+        return
+
+    if has_active_virtual_amendments(doc.return_against):
+        frappe.throw(
+            _(
+                "{0} already has a Digitax virtual amendment in progress. Virtual amendments and "
+                "Credit Notes both correct a filed sale - use one or the other, not both."
+            ).format(frappe.bold(doc.return_against))
+        )
+
 
 def _load_virtual_amendment_context(invoice_name):
+    # Row-level lock (SELECT ... FOR UPDATE), held for the rest of this request/
+    # job until it commits or rolls back. _throw_if_sent_trader_exists only
+    # catches a double-send if the first attempt's amendment row was already
+    # recorded by the time the second one checks - without a lock, two
+    # near-simultaneous clicks (double-click, two tabs, a slow retry) can both
+    # pass that check before either has recorded anything, and both then POST
+    # the same trader_invoice_number to Digitax independently. A second
+    # concurrent request for the SAME invoice now blocks here until the first
+    # finishes, then correctly sees the just-recorded Sent row and throws.
+    frappe.db.get_value("Sales Invoice", invoice_name, "name", for_update=True)
+
     doc = frappe.get_doc("Sales Invoice", invoice_name)
     digitax_settings = get_digitax_settings(doc.company)
     _validate_virtual_amendment_user(digitax_settings)
@@ -775,6 +1384,20 @@ def _ensure_original_sale_row(doc):
     if not doc.custom_sale_id:
         frappe.throw(_("Original Digitax sale ID is missing. Cannot start a virtual amendment."))
 
+    # Best-effort real amount from the invoice's current items (N6), same as the
+    # reversal/virtual-sale rows below - this is only a summary display value for
+    # the amendment history table (the actual original send's exact payload was
+    # never stored, see N6 notes), so a gate failure here falls back to the old
+    # grand_total approximation rather than blocking - this call must never stop
+    # someone from viewing/starting an amendment just because current item master
+    # data has since drifted.
+    logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
+    original_digitax_settings = get_digitax_settings(doc.company)
+    built = build_digitax_items_payload(doc, original_digitax_settings, logger, dry_run=True)
+    original_amount = (
+        sum(float(i.get("total_amount") or 0) for i in built["items"]) if built.get("ok") else abs(doc.grand_total)
+    )
+
     row = doc.append("custom_digitax_amendments", {
         "amendment_type": "Original Sale",
         "trader_invoice_number": _get_trader_invoice_base(doc),
@@ -790,7 +1413,7 @@ def _ensure_original_sale_row(doc):
         "original_sale_id": doc.custom_original_sale_id,
         "digitax_date": doc.custom_date,
         "digitax_time": doc.custom_time,
-        "amount": abs(doc.grand_total),
+        "amount": original_amount,
         "customer_pin_after": doc.tax_id,
         "customer_pin_source_after": "Sales Invoice",
         "customer_name_after": doc.customer_name,
@@ -866,11 +1489,30 @@ def _throw_if_sent_trader_exists(doc, trader_invoice_number):
             frappe.throw(_("Digitax amendment {0} has already been sent.").format(trader_invoice_number))
 
 
-def _build_virtual_reversal_payload(doc, digitax_settings, state):
+def _build_virtual_reversal_payload(doc, digitax_settings, state, logger):
+    """Build a real credit-note payload from this invoice's actual items (N6) -
+    replaces the old synthetic single-line item. include_sale_fields=False is
+    passed explicitly rather than relying on doc.is_return: which endpoint
+    shape is needed depends on the amendment action (this is a reversal), not
+    on whether the *original* invoice was itself a return.
+
+    Subject to the same item-link/sync gates a normal send goes through (an
+    invoice whose items aren't fully linked to Digitax Items is blocked here
+    too, same as a normal send would be) - a deliberate choice over silently
+    bypassing them for amendments, since a broken/incomplete item link is a
+    real data problem worth surfacing rather than filing anyway.
+
+    Returns {"ok": True, "payload": ..., "items": ...} or the {"ok": False,
+    ...} shape straight from build_digitax_items_payload on a gate failure.
+    """
+    built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=False, include_sale_fields=False)
+    if not built.get("ok"):
+        return built
+
     submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
     payload = {
         "trader_invoice_number": state["next_reversal_trader_invoice_number"],
-        "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=False)],
+        "items": built["items"],
         "invoice_status_code": submitted_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "return_date": _get_digitax_correction_date(),
@@ -882,14 +1524,22 @@ def _build_virtual_reversal_payload(doc, digitax_settings, state):
         payload["customer_tin"] = str(customer_pin.get("pin"))
         payload["customer_name"] = str(doc.customer_name)
 
-    return payload
+    return {"ok": True, "payload": payload, "items": built["items"]}
 
 
-def _build_virtual_sale_payload(doc, digitax_settings, state):
+def _build_virtual_sale_payload(doc, digitax_settings, state, logger):
+    """Build a real sales-with-items payload from this invoice's actual items
+    (N6) - see _build_virtual_reversal_payload for the shared design notes
+    (real items, explicit include_sale_fields, gates apply).
+    """
+    built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=False, include_sale_fields=True)
+    if not built.get("ok"):
+        return built
+
     submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
     payload = {
         "trader_invoice_number": state["next_sale_trader_invoice_number"],
-        "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=True)],
+        "items": built["items"],
         "invoice_status_code": submitted_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "sale_date": _get_digitax_correction_date(),
@@ -902,7 +1552,7 @@ def _build_virtual_sale_payload(doc, digitax_settings, state):
         payload["customer_tin"] = str(customer_pin.get("pin"))
         payload["customer_name"] = str(doc.customer_name)
 
-    return payload
+    return {"ok": True, "payload": payload, "items": built["items"]}
 
 
 def _post_virtual_amendment(url, payload, digitax_settings, logger, company=None):
@@ -914,7 +1564,7 @@ def _post_virtual_amendment(url, payload, digitax_settings, logger, company=None
         logger.error(f"Digitax virtual amendment network failure: {response_data}")
         return response_data, 0
 
-    if status_code == 409 and "trader_invoice_number has already been used" in (response_data.get("message", "").lower()):
+    if status_code == 409 and DUPLICATE_TRADER_INVOICE_MESSAGE in (response_data.get("message", "").lower()):
         existing_sale_id = (response_data.get("metadata") or {}).get("existing_sale_id", "")
         if existing_sale_id:
             sale_details = fetch_sale_details_from_digitax(existing_sale_id, company)
@@ -970,14 +1620,24 @@ def _json_dump(data):
     return json.dumps(data or {}, indent=2, default=str)
 
 
-def _build_preview_response(action, doc, trader_invoice_number, correction_reason, before_values, after_values):
+def _build_preview_response(action, doc, trader_invoice_number, correction_reason, before_values, after_values, items):
+    """items is this amendment's real Digitax item list (N6) - the amount and
+    item breakdown shown here now reflect what will actually be sent, not the
+    old fake single "School Fees" line.
+    """
     return {
         "action": action,
         "invoice_name": doc.name,
         "customer": doc.customer_name,
         "trader_invoice_number": trader_invoice_number,
-        "amount": abs(doc.grand_total),
-        "item": "School Fees",
+        "amount": sum(float(i.get("total_amount") or 0) for i in items),
+        "items": [
+            {
+                "description": i.get("item_description") or i.get("item_name") or "",
+                "amount": i.get("total_amount"),
+            }
+            for i in items
+        ],
         "correction_reason": correction_reason,
         "before": before_values,
         "after": after_values,
@@ -985,8 +1645,9 @@ def _build_preview_response(action, doc, trader_invoice_number, correction_reaso
     }
 
 
-def _build_virtual_reversal_preview(doc, state, correction_reason):
+def _build_virtual_reversal_preview(doc, state, correction_reason, items):
     customer_pin = resolve_digitax_customer_pin(doc)
+    total_amount = sum(float(i.get("total_amount") or 0) for i in items)
     return _build_preview_response(
         "Virtual Credit Note",
         doc,
@@ -995,23 +1656,25 @@ def _build_virtual_reversal_preview(doc, state, correction_reason):
         {
             "Digitax Sale ID": state.get("active_sale_id"),
             "Trader Invoice No.": state.get("active_trader_invoice_number"),
-            "Amount": abs(doc.grand_total),
+            "Amount": total_amount,
             "Status": "Active Digitax Sale",
         },
         {
             "Digitax Sale ID": "No active sale until corrected virtual sale is sent",
             "Trader Invoice No.": state["next_reversal_trader_invoice_number"],
-            "Amount": abs(doc.grand_total),
+            "Amount": total_amount,
             "Status": "Awaiting Corrected Virtual Sale",
             "Correction Reason": correction_reason,
             "Customer PIN": customer_pin.get("pin") or "Not provided",
             "PIN Source": customer_pin.get("source"),
         },
+        items,
     )
 
 
-def _build_virtual_sale_preview(doc, state, correction_reason):
+def _build_virtual_sale_preview(doc, state, correction_reason, items):
     customer_pin = resolve_digitax_customer_pin(doc)
+    total_amount = sum(float(i.get("total_amount") or 0) for i in items)
     return _build_preview_response(
         "Virtual Sale",
         doc,
@@ -1023,7 +1686,7 @@ def _build_virtual_sale_preview(doc, state, correction_reason):
             "Customer Name": doc.customer_name,
             "Trader Invoice No.": "Awaiting corrected virtual sale",
             "Digitax Sale ID": "No active sale",
-            "Amount": abs(doc.grand_total),
+            "Amount": total_amount,
         },
         {
             "Customer PIN": customer_pin.get("pin") or "Not provided",
@@ -1031,9 +1694,10 @@ def _build_virtual_sale_preview(doc, state, correction_reason):
             "Customer Name": doc.customer_name,
             "Trader Invoice No.": state["next_sale_trader_invoice_number"],
             "Digitax Sale ID": "New sale will be created",
-            "Amount": abs(doc.grand_total),
+            "Amount": total_amount,
             "Correction Reason": correction_reason,
         },
+        items,
     )
 
 
@@ -1041,6 +1705,16 @@ def _build_virtual_sale_preview(doc, state, correction_reason):
 def get_digitax_virtual_amendment_status(invoice_name):
     doc = frappe.get_doc("Sales Invoice", invoice_name)
     digitax_settings = get_digitax_settings(doc.company)
+
+    # This runs automatically on every sent-invoice form load (to decide whether
+    # to show the amendment buttons), not on a deliberate user action - so unlike
+    # the interactive send/sync entrypoints, a caller without send_role gets a
+    # minimal "nothing to show" response rather than a thrown permission error,
+    # which would otherwise pop up an error dialog just from opening an invoice.
+    send_role = digitax_settings.get("send_role")
+    if not send_role or send_role not in (frappe.get_roles() or []):
+        return {"can_create": False}
+
     role = digitax_settings.get("virtual_amendment_role")
 
     can_create = bool(
@@ -1068,25 +1742,39 @@ def get_digitax_virtual_amendment_status(invoice_name):
 @frappe.whitelist()
 def preview_virtual_digitax_reversal(invoice_name, correction_reason=None):
     correction_reason = _require_correction_reason(correction_reason)
+    logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
     doc, digitax_settings = _load_virtual_amendment_context(invoice_name)
     state = _get_virtual_amendment_state(doc)
 
     if not state.get("active_sale_id"):
         frappe.throw(_("There is no active Digitax sale to reverse. Send the corrected virtual sale first if a reversal was already sent."))
 
-    return _build_virtual_reversal_preview(doc, state, correction_reason)
+    # dry_run=True: this is a preview, never write/commit/raise an Actionable
+    # Item just because someone opened the confirmation dialog - but a gate
+    # failure still blocks the preview (same policy as the actual send) so a
+    # user finds out about a missing item link before clicking Send, not after.
+    built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True, include_sale_fields=False)
+    if not built.get("ok"):
+        frappe.throw(built.get("message") or _("Unable to build Digitax items for this reversal."))
+
+    return _build_virtual_reversal_preview(doc, state, correction_reason, built["items"])
 
 
 @frappe.whitelist()
 def preview_virtual_digitax_sale(invoice_name, correction_reason=None):
     correction_reason = _require_correction_reason(correction_reason)
+    logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
     doc, digitax_settings = _load_virtual_amendment_context(invoice_name)
     state = _get_virtual_amendment_state(doc)
 
     if state.get("active_sale_id"):
         frappe.throw(_("Send a virtual reversal before sending a corrected virtual sale."))
 
-    return _build_virtual_sale_preview(doc, state, correction_reason)
+    built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True, include_sale_fields=True)
+    if not built.get("ok"):
+        frappe.throw(built.get("message") or _("Unable to build Digitax items for this virtual sale."))
+
+    return _build_virtual_sale_preview(doc, state, correction_reason, built["items"])
 
 
 @frappe.whitelist()
@@ -1104,8 +1792,20 @@ def send_virtual_digitax_reversal(invoice_name, correction_reason=None):
     trader_invoice_number = state["next_reversal_trader_invoice_number"]
     _throw_if_sent_trader_exists(doc, trader_invoice_number)
 
-    payload = _build_virtual_reversal_payload(doc, digitax_settings, state)
-    preview = _build_virtual_reversal_preview(doc, state, correction_reason)
+    built = _build_virtual_reversal_payload(doc, digitax_settings, state, logger)
+    if not built.get("ok"):
+        # A gate failure (e.g. missing/unsynced Digitax Item link) - nothing was
+        # sent, so no amendment row is recorded. build_digitax_items_payload has
+        # already written custom_error_message and raised an Actionable Item.
+        return {
+            "success": False,
+            "skipped": True,
+            "reason": built.get("reason"),
+            "message": built.get("message"),
+        }
+
+    payload = built["payload"]
+    preview = _build_virtual_reversal_preview(doc, state, correction_reason, built["items"])
     response_data, status_code = _post_virtual_amendment(
         "credit-notes-with-barcode", payload, digitax_settings, logger, company=doc.company
     )
@@ -1116,7 +1816,7 @@ def send_virtual_digitax_reversal(invoice_name, correction_reason=None):
         "trader_invoice_number": trader_invoice_number,
         "reference_sale_id": state["active_sale_id"],
         "status": "Sent" if success else "Failed",
-        "amount": abs(doc.grand_total),
+        "amount": sum(float(i.get("total_amount") or 0) for i in built["items"]),
         "correction_reason": correction_reason,
         "preview_before": _json_dump(preview.get("before")),
         "preview_after": _json_dump(preview.get("after")),
@@ -1152,8 +1852,17 @@ def send_virtual_digitax_sale(invoice_name, correction_reason=None):
     trader_invoice_number = state["next_sale_trader_invoice_number"]
     _throw_if_sent_trader_exists(doc, trader_invoice_number)
 
-    payload = _build_virtual_sale_payload(doc, digitax_settings, state)
-    preview = _build_virtual_sale_preview(doc, state, correction_reason)
+    built = _build_virtual_sale_payload(doc, digitax_settings, state, logger)
+    if not built.get("ok"):
+        return {
+            "success": False,
+            "skipped": True,
+            "reason": built.get("reason"),
+            "message": built.get("message"),
+        }
+
+    payload = built["payload"]
+    preview = _build_virtual_sale_preview(doc, state, correction_reason, built["items"])
     response_data, status_code = _post_virtual_amendment(
         "sales-with-items", payload, digitax_settings, logger, company=doc.company
     )
@@ -1164,7 +1873,7 @@ def send_virtual_digitax_sale(invoice_name, correction_reason=None):
         "amendment_type": "Virtual Sale",
         "trader_invoice_number": trader_invoice_number,
         "status": "Sent" if success else "Failed",
-        "amount": abs(doc.grand_total),
+        "amount": sum(float(i.get("total_amount") or 0) for i in built["items"]),
         "customer_pin_before": doc.tax_id,
         "customer_pin_after": customer_pin.get("pin"),
         "customer_pin_source_before": "Sales Invoice" if doc.tax_id else "Not Provided",

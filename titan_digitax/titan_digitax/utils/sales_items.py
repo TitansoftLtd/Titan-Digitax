@@ -9,6 +9,7 @@ import frappe
 
 from titan_digitax.titan_digitax.utils import digitax_item_sync
 from titan_digitax.titan_digitax.utils.actionable import create_actionable_item
+from titan_digitax.titan_digitax.utils.discount_handler import resolve_discount_handler
 
 
 def _round_qty1_amount(amount):
@@ -17,10 +18,25 @@ def _round_qty1_amount(amount):
 	return 1, total, total
 
 
-def build_digitax_items_payload(doc, digitax_settings, logger=None):
+def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=False, include_sale_fields=None):
 	"""
 	Collect SI lines, apply D14 gates, aggregate by DigiTax display name,
 	redistribute discounts, return DigiTax items[] or a skip/error dict.
+
+	dry_run=True skips every write side effect a gate failure would otherwise
+	cause (writing custom_error_message, committing, raising an Actionable Item)
+	while still returning the exact same {"ok": False, ...} shape - for callers
+	that only need to know WHAT would be sent (e.g. building a print preview),
+	not actually record a failed send. The real send path never sets this.
+
+	include_sale_fields controls whether each item gets the sale-only fields
+	(item_name, item_class_code, item_tax_type_code, is_stockable) needed for
+	sales-with-items, or omits them for credit-notes-with-barcode. Defaults to
+	None, which derives it from doc.is_return - correct for a normal send,
+	where the endpoint is determined by the invoice's own nature. A virtual
+	amendment must pass this explicitly instead: which endpoint it's building
+	for depends on the amendment action (reversal vs. corrected sale), not on
+	whether the *original* invoice happened to be a return.
 
 	Returns:
 		dict with either:
@@ -31,6 +47,7 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 
 	require_name = bool(digitax_settings.get("require_digitax_item_name", 1))
 	require_sync = bool(digitax_settings.get("require_manual_item_sync", 1))
+	use_sale_fields = (not doc.is_return) if include_sale_fields is None else include_sale_fields
 
 	gate_failures = []
 	items_dict = {}  # display_name -> aggregated line
@@ -118,7 +135,7 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 					f"Conflicting DigiTax IDs for display name '{display_name}': "
 					f"{existing['id']} vs {digitax_id}"
 				)
-				return _block_send(doc, msg, "conflicting_digitax_ids", log)
+				return _block_send(doc, msg, "conflicting_digitax_ids", log, dry_run)
 			if digitax_id and not existing.get("id"):
 				existing["id"] = digitax_id
 			existing["total_amount"] = round(existing["total_amount"] + line_amount, 2)
@@ -144,7 +161,7 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 			# and are only meaningful on the sales side; credit notes reference an
 			# already-registered item by id/barcode instead.
 			entry["item_bar_code"] = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
-			if not doc.is_return:
+			if use_sale_fields:
 				entry["item_name"] = display_name
 				entry["item_class_code"] = (
 					(digitax_item.item_class_code if digitax_item else None)
@@ -160,10 +177,10 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 			items_dict[display_name] = entry
 
 	if gate_failures:
-		return _block_gate_failures(doc, gate_failures, require_name, require_sync, log)
+		return _block_gate_failures(doc, gate_failures, require_name, require_sync, log, dry_run)
 
 	if discount_items:
-		result = _apply_discounts(doc, items_dict, discount_items, total_discounts, log)
+		result = _apply_discounts(doc, items_dict, discount_items, total_discounts, log, dry_run)
 		if result is not None:
 			return result
 
@@ -185,29 +202,30 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None):
 
 	if not payload_items:
 		msg = "No items to send to Digitax. All items were filtered out (zero amount or unit_price < 0.01)."
-		return _block_send(doc, msg, "no_items_after_filtering", log)
+		return _block_send(doc, msg, "no_items_after_filtering", log, dry_run)
 
 	log.info(f"Built {len(payload_items)} DigiTax line(s) after aggregation by display name")
 	return {"ok": True, "items": payload_items}
 
 
-def _apply_discounts(doc, items_dict, discount_items, total_discounts, log):
+def _apply_discounts(doc, items_dict, discount_items, total_discounts, log, dry_run=False):
+	"""Redistribute the total discount value across items_dict's real item lines.
+
+	A negative-amount line ("this is actually a discount") isn't something
+	standard ERPNext discount entry produces on its own - it's specific to
+	whatever MIS integration maps a discount that way (e.g. Engage, via
+	st_austins). Redistributing it correctly needs that integration's own
+	knowledge (e.g. which items the discount is even meant to apply against,
+	how to split it across different tax types), so the actual algorithm is
+	delegated to whatever app declares digitax_discount_redistribution_handler
+	(see discount_handler.py) - titan_digitax itself only does the basic sanity
+	check (discount not bigger than the invoice) and, if no handler is
+	installed, refuses to guess and blocks instead of applying its own
+	naive largest-first split.
+	"""
 	log.info(f"Processing {len(discount_items)} discount items. Total discounts: {total_discounts}")
 
-	all_items = []
-	total_items_amount = 0
-	for display_name, item_data in items_dict.items():
-		all_items.append(
-			{
-				"display_name": display_name,
-				"description": item_data["item_description"],
-				"amount": item_data["total_amount"],
-				"item_data": item_data,
-			}
-		)
-		total_items_amount += item_data["total_amount"]
-
-	all_items.sort(key=lambda x: x["amount"], reverse=True)
+	total_items_amount = sum(item_data["total_amount"] for item_data in items_dict.values())
 
 	if total_discounts > total_items_amount:
 		discount_names = [f"{d['item_name']} ({d['discount_amount']})" for d in discount_items]
@@ -215,49 +233,85 @@ def _apply_discounts(doc, items_dict, discount_items, total_discounts, log):
 			f"Total discounts ({total_discounts}) exceed total invoice items amount ({total_items_amount}). "
 			f"Discounts: {', '.join(discount_names)}"
 		)
+		if not dry_run:
+			create_actionable_item(
+				title=f"Discounts Exceed Invoice Total: {doc.name}",
+				item_type="Discount Validation Error",
+				description=(
+					f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
+					f"<p><strong>Issue:</strong> Total discounts <strong>({total_discounts})</strong> "
+					f"exceed total invoice amount <strong>({total_items_amount})</strong>.</p>"
+				),
+				action_required=f"Reduce total discounts to max {total_items_amount} or adjust invoice amounts",
+				reference_doctype="Sales Invoice",
+				reference_name=doc.name,
+				related_data=frappe.as_json(
+					{
+						"total_discounts": total_discounts,
+						"total_items_amount": total_items_amount,
+						"discount_items": discount_items,
+					}
+				),
+				priority="High",
+			)
+		return _block_send(doc, error_msg, "discounts_exceed_total", log, dry_run)
+
+	handler = resolve_discount_handler()
+	if handler:
+		try:
+			handler(items_dict, discount_items, total_discounts, doc, log)
+			return None
+		except Exception as e:
+			error_msg = str(e)
+			log.error(f"Discount redistribution handler failed: {error_msg}")
+			if not dry_run:
+				create_actionable_item(
+					title=f"Digitax Discount Redistribution Failed: {doc.name}",
+					item_type="Discount Validation Error",
+					description=(
+						f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
+						f"<p><strong>Issue:</strong> {error_msg}</p>"
+					),
+					action_required="Resolve the discount allocation on this invoice, or adjust amounts",
+					reference_doctype="Sales Invoice",
+					reference_name=doc.name,
+					related_data=frappe.as_json({"discount_items": discount_items}),
+					priority="High",
+				)
+			return _block_send(doc, error_msg, "discount_redistribution_failed", log, dry_run)
+
+	# No handler resolved - refuse to guess how to redistribute an unexpected
+	# negative-amount line rather than silently applying a naive split.
+	discount_names = [f"{d['item_name']} ({d['discount_amount']})" for d in discount_items]
+	error_msg = (
+		f"This invoice has {len(discount_items)} negative-amount line(s) that look like "
+		f"discounts ({', '.join(discount_names)}), but no installed app declares "
+		f"digitax_discount_redistribution_handler to redistribute them. This isn't "
+		f"standard ERPNext discount entry - refusing to guess how to apply it."
+	)
+	if not dry_run:
 		create_actionable_item(
-			title=f"Discounts Exceed Invoice Total: {doc.name}",
+			title=f"Digitax Discount Handling Not Configured: {doc.name}",
 			item_type="Discount Validation Error",
 			description=(
 				f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
-				f"<p><strong>Issue:</strong> Total discounts <strong>({total_discounts})</strong> "
-				f"exceed total invoice amount <strong>({total_items_amount})</strong>.</p>"
+				f"<p>{error_msg}</p>"
 			),
-			action_required=f"Reduce total discounts to max {total_items_amount} or adjust invoice amounts",
+			action_required=(
+				"Install/configure an app that declares digitax_discount_redistribution_handler, "
+				"or resolve this invoice's discount line(s) manually"
+			),
 			reference_doctype="Sales Invoice",
 			reference_name=doc.name,
-			related_data=frappe.as_json(
-				{
-					"total_discounts": total_discounts,
-					"total_items_amount": total_items_amount,
-					"discount_items": discount_items,
-				}
-			),
+			related_data=frappe.as_json({"discount_items": discount_items}),
 			priority="High",
 		)
-		return _block_send(doc, error_msg, "discounts_exceed_total", log)
-
-	remaining_discount = total_discounts
-	for item in all_items:
-		if remaining_discount <= 0:
-			break
-		item_data = item["item_data"]
-		original_amount = item["amount"]
-		if remaining_discount >= original_amount:
-			new_amount = 0
-			remaining_discount -= original_amount
-		else:
-			new_amount = original_amount - remaining_discount
-			remaining_discount = 0
-		qty, unit_pr, total_amt = _round_qty1_amount(new_amount)
-		item_data["quantity"] = qty
-		item_data["unit_price"] = unit_pr
-		item_data["total_amount"] = total_amt
+	return _block_send(doc, error_msg, "discount_handler_not_configured", log, dry_run)
 
 	return None
 
 
-def _block_gate_failures(doc, gate_failures, require_name, require_sync, log):
+def _block_gate_failures(doc, gate_failures, require_name, require_sync, log, dry_run=False):
 	missing_links = [g for g in gate_failures if g["reason"] == "missing_digitax_item_link"]
 	missing_ids = [g for g in gate_failures if g["reason"] == "missing_digitax_id"]
 
@@ -276,25 +330,33 @@ def _block_gate_failures(doc, gate_failures, require_name, require_sync, log):
 	if require_name or require_sync:
 		error_msg += ". DigiTax send blocked by Digitax Company Settings gates."
 
-	create_actionable_item(
-		title=f"Digitax Item Gates Failed: {doc.name}",
-		item_type="Missing Digitax IDs",
-		description=(
-			f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
-			f"<p>{error_msg}</p>"
-			f"<ul>{''.join(f'<li>{g['item_code']} - {g['item_name']} ({g['reason']})</li>' for g in gate_failures)}</ul>"
-		),
-		action_required="Link a Digitax Item and/or Sync it to Digitax for the listed Items",
-		reference_doctype="Sales Invoice",
-		reference_name=doc.name,
-		related_data=frappe.as_json({"gate_failures": gate_failures}),
-		priority="High",
-	)
-	return _block_send(doc, error_msg, "digitax_item_gates_failed", log)
+	if not dry_run:
+		create_actionable_item(
+			title=f"Digitax Item Gates Failed: {doc.name}",
+			item_type="Missing Digitax IDs",
+			description=(
+				f"<p><strong>Sales Invoice:</strong> {doc.name} cannot be sent to Digitax.</p>"
+				f"<p>{error_msg}</p>"
+				f"<ul>{''.join(f'<li>{g['item_code']} - {g['item_name']} ({g['reason']})</li>' for g in gate_failures)}</ul>"
+			),
+			action_required="Link a Digitax Item and/or Sync it to Digitax for the listed Items",
+			reference_doctype="Sales Invoice",
+			reference_name=doc.name,
+			related_data=frappe.as_json({"gate_failures": gate_failures}),
+			priority="High",
+		)
+	return _block_send(doc, error_msg, "digitax_item_gates_failed", log, dry_run)
 
 
-def _block_send(doc, error_msg, reason, log):
+def _block_send(doc, error_msg, reason, log, dry_run=False):
 	log.error(f"SKIP INVOICE: {error_msg}")
+	if dry_run:
+		return {
+			"ok": False,
+			"skipped": True,
+			"reason": reason,
+			"message": error_msg,
+		}
 	frappe.db.set_value(
 		"Sales Invoice",
 		doc.name,

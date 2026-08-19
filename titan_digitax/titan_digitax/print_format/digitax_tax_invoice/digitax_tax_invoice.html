@@ -1,15 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>Digitax Tax Invoice</title>
-</head>
-<body>
 {% set ctx = get_digitax_print_context(doc) %}
 
 <div class="digitax-receipt">
   <div class="receipt-header">
-    <h3 class="school-name">{{ ctx.company.name }}</h3>
+    <h3 class="company-name">{{ ctx.company.name }}</h3>
   </div>
 
   {% if not ctx.is_available %}
@@ -36,7 +29,7 @@
     </div>
 
     <div class="right-section">
-      <div class="school-logo">
+      <div class="company-logo">
         <img src="{{ ctx.company.logo_url }}" alt="Company Logo" />
       </div>
       <div class="signature-box"></div>
@@ -78,12 +71,14 @@
         </tr>
       </thead>
       <tbody>
+        {% for item in ctx.line_items %}
         <tr>
-          <td>{{ ctx.item.item_name }}</td>
-          <td class="text-right">{{ ctx.item.formatted_unit_price }}</td>
-          <td class="text-right">x{{ ctx.item.quantity | int }}</td>
-          <td class="text-right">{{ ctx.item.formatted_total_amount }}</td>
+          <td>{{ item.item_name }}</td>
+          <td class="text-right">{{ item.formatted_unit_price }}</td>
+          <td class="text-right">x{{ item.quantity | int }}</td>
+          <td class="text-right">{{ item.formatted_total_amount }}</td>
         </tr>
+        {% endfor %}
       </tbody>
     </table>
     <div class="total-row">
@@ -149,5 +144,3 @@
 
   {% endif %}
 </div>
-</body>
-</html>

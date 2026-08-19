@@ -19,6 +19,7 @@
   "target_country",
   "api_request_timeout",
   "max_retry_attempts",
+  "retry_batch_size",
   "background_job_timeout",
   "item_sync_overrides_section",
   "require_digitax_item_name",
@@ -26,8 +27,12 @@
   "column_break_d14",
   "auto_sync_items_to_digitax",
   "auto_match_items_by_name",
-  "virtual_amendments_section",
+  "digitax_roles_section",
+  "send_role",
+  "item_sync_role",
   "virtual_amendment_role",
+  "column_break_digitax_roles",
+  "digitax_sync_user",
   "default_item_settings_section",
   "default_item_class_code",
   "default_item_type_code",
@@ -38,9 +43,7 @@
   "default_quantity_unit_code",
   "school_fees_item_section",
   "default_item_bar_code",
-  "default_item_name",
   "column_break_school_fees",
-  "default_item_description",
   "default_is_stockable",
   "invoice_status_codes_section",
   "submitted_invoice_status_code",
@@ -160,6 +163,13 @@
    "label": "Max Retry Attempts"
   },
   {
+   "default": "100",
+   "description": "Max unsent invoices for this company retried in a single hourly sweep, oldest first (default: 100). At a typical ~5s per send, 100 invoices takes roughly 8 minutes; worst case (every invoice hitting the full API Request Timeout) it's bounded by that timeout x this number, shared across all companies within Background Job Timeout. A large backlog drains gradually over multiple hourly runs rather than one sweep trying to process everything at once.",
+   "fieldname": "retry_batch_size",
+   "fieldtype": "Int",
+   "label": "Retry Batch Size"
+  },
+  {
    "default": "600",
    "description": "Timeout for background retry jobs in seconds (default: 600 = 10 minutes)",
    "fieldname": "background_job_timeout",
@@ -205,9 +215,23 @@
    "label": "Auto Match Items by Name"
   },
   {
-   "fieldname": "virtual_amendments_section",
+   "fieldname": "digitax_roles_section",
    "fieldtype": "Section Break",
-   "label": "Virtual Amendments"
+   "label": "Digitax Roles & Sync Identity"
+  },
+  {
+   "description": "Only users with this role can manually send a Sales Invoice to Digitax or view its Digitax/amendment status for this company.",
+   "fieldname": "send_role",
+   "fieldtype": "Link",
+   "label": "Send Role",
+   "options": "Role"
+  },
+  {
+   "description": "Only users with this role can manually sync a Digitax Item to this company's Digitax/KRA account.",
+   "fieldname": "item_sync_role",
+   "fieldtype": "Link",
+   "label": "Item Sync Role",
+   "options": "Role"
   },
   {
    "description": "Only users with this role can preview and send Digitax virtual amendments for this company.",
@@ -215,6 +239,18 @@
    "fieldtype": "Link",
    "label": "Virtual Amendment Role",
    "options": "Role"
+  },
+  {
+   "fieldname": "column_break_digitax_roles",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "digitaxsyncuser@example.com",
+   "description": "The account that automatic/background Digitax work (invoice submit, hourly retries, item auto-sync) always runs as, and that manual actions switch to once the initiating user's role above is confirmed - so every Digitax write is consistently attributed to one account rather than whichever user or background job happened to trigger it.",
+   "fieldname": "digitax_sync_user",
+   "fieldtype": "Link",
+   "label": "Digitax Sync User",
+   "options": "User"
   },
   {
    "fieldname": "default_item_settings_section",
@@ -271,32 +307,18 @@
   {
    "fieldname": "school_fees_item_section",
    "fieldtype": "Section Break",
-   "label": "School Fees Item Details"
+   "label": "Default Item Details"
   },
   {
    "default": "SCHOOL_FEES",
-   "description": "Default item bar code for school fees (default: SCHOOL_FEES)",
+   "description": "Default item bar code used when a line has no matching Digitax Item (default: SCHOOL_FEES)",
    "fieldname": "default_item_bar_code",
    "fieldtype": "Data",
    "label": "Default Item Bar Code"
   },
   {
-   "default": "School Fees",
-   "description": "Default item name for school fees (default: School Fees)",
-   "fieldname": "default_item_name",
-   "fieldtype": "Data",
-   "label": "Default Item Name"
-  },
-  {
    "fieldname": "column_break_school_fees",
    "fieldtype": "Column Break"
-  },
-  {
-   "default": "School Fees",
-   "description": "Default item description for school fees (default: School Fees)",
-   "fieldname": "default_item_description",
-   "fieldtype": "Data",
-   "label": "Default Item Description"
   },
   {
    "default": "0",
@@ -349,7 +371,7 @@
    "label": "Print / Invoice Details"
   },
   {
-   "description": "Shown under the company name on the printed invoice, e.g. a school motto.",
+   "description": "Shown under the company name on the printed invoice, e.g. a motto or tagline.",
    "fieldname": "print_tagline",
    "fieldtype": "Data",
    "label": "Print Tagline"
@@ -372,7 +394,7 @@
   {
    "fieldname": "term_opening_date",
    "fieldtype": "Date",
-   "label": "Official School Opening Date"
+   "label": "Official Opening Date"
   },
   {
    "fieldname": "bank_details_section",

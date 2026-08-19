@@ -1,15 +1,15 @@
 # Copyright (c) 2026, Titan and contributors
 # For license information, please see license.txt
 
-"""Create Actionable Items without hard-coding a school app import.
+"""Create Actionable Items without hard-coding a client app import.
 
-`titan_digitax` is shared across schools, so it must not name any of them.
-A school app is discovered in one of two ways:
+`titan_digitax` is shared across clients, so it must not name any of them.
+A client app is discovered in one of two ways:
 
 1. It declares a handler in its ``hooks.py`` (preferred, explicit)::
 
        digitax_actionable_item_handler = (
-           "my_school.my_school.doctype.actionable_items"
+           "my_client_app.my_client_app.doctype.actionable_items"
            ".actionable_items.create_actionable_item"
        )
 
@@ -17,7 +17,7 @@ A school app is discovered in one of two ways:
    ``<app>.<app>.doctype.actionable_items.actionable_items.create_actionable_item``.
 
 If neither resolves, the call is a no-op and the reason is logged — DigiTax
-sync paths must never fail because a school app is absent.
+sync paths must never fail because a client app is absent.
 """
 
 from __future__ import annotations
