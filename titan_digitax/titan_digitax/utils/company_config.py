@@ -8,7 +8,7 @@ for this decision – that field is shared with Sage, MIS, and bulk banking.
 Every DigiTax setting — credentials, timeouts, item defaults, invoice status
 codes — lives on this company's own Digitax Company Settings row. There is no
 shared/global tier: sending with another company's key would file this
-company's invoices into another school's KRA account, so nothing here ever
+company's invoices into another company's KRA account, so nothing here ever
 falls back to a different company's values.
 """
 

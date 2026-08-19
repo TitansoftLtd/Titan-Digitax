@@ -2,7 +2,7 @@
 
 <div class="digitax-receipt">
   <div class="receipt-header">
-    <h3 class="school-name">{{ ctx.company.name }}</h3>
+    <h3 class="company-name">{{ ctx.company.name }}</h3>
   </div>
 
   {% if not ctx.is_available %}
@@ -29,7 +29,7 @@
     </div>
 
     <div class="right-section">
-      <div class="school-logo">
+      <div class="company-logo">
         <img src="{{ ctx.company.logo_url }}" alt="Company Logo" />
       </div>
       <div class="signature-box"></div>

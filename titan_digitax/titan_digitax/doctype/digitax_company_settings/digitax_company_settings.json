@@ -309,18 +309,18 @@
   {
    "fieldname": "school_fees_item_section",
    "fieldtype": "Section Break",
-   "label": "School Fees Item Details"
+   "label": "Default Item Details"
   },
   {
    "default": "SCHOOL_FEES",
-   "description": "Default item bar code for school fees (default: SCHOOL_FEES)",
+   "description": "Default item bar code used when a line has no matching Digitax Item (default: SCHOOL_FEES)",
    "fieldname": "default_item_bar_code",
    "fieldtype": "Data",
    "label": "Default Item Bar Code"
   },
   {
    "default": "School Fees",
-   "description": "Default item name for school fees (default: School Fees)",
+   "description": "Default item name used when a line has no matching Digitax Item (default: School Fees)",
    "fieldname": "default_item_name",
    "fieldtype": "Data",
    "label": "Default Item Name"
@@ -331,7 +331,7 @@
   },
   {
    "default": "School Fees",
-   "description": "Default item description for school fees (default: School Fees)",
+   "description": "Default item description used when a line has no matching Digitax Item (default: School Fees)",
    "fieldname": "default_item_description",
    "fieldtype": "Data",
    "label": "Default Item Description"
@@ -387,7 +387,7 @@
    "label": "Print / Invoice Details"
   },
   {
-   "description": "Shown under the company name on the printed invoice, e.g. a school motto.",
+   "description": "Shown under the company name on the printed invoice, e.g. a motto or tagline.",
    "fieldname": "print_tagline",
    "fieldtype": "Data",
    "label": "Print Tagline"
@@ -410,7 +410,7 @@
   {
    "fieldname": "term_opening_date",
    "fieldtype": "Date",
-   "label": "Official School Opening Date"
+   "label": "Official Opening Date"
   },
   {
    "fieldname": "bank_details_section",

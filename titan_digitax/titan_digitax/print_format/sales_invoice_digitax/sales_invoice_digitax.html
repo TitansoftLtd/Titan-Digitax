@@ -1,11 +1,11 @@
-{% set ctx = get_school_invoice_print_context(doc) %}
+{% set ctx = get_sales_invoice_digitax_print_context(doc) %}
 
 <div class="sid-invoice">
   <div class="sid-header">
     {% if ctx.company.logo_url %}
     <img class="sid-logo" src="{{ ctx.company.logo_url }}" alt="Logo" />
     {% endif %}
-    <div class="sid-school-name">{{ ctx.company.name }}</div>
+    <div class="sid-company-name">{{ ctx.company.name }}</div>
     {% if ctx.company.tagline %}
     <div class="sid-tagline">{{ ctx.company.tagline }}</div>
     {% endif %}
@@ -44,7 +44,7 @@
     </table>
   </div>
 
-  <table class="sid-fees-table">
+  <table class="sid-items-table">
     <thead>
       <tr>
         <th>Description</th>
@@ -52,7 +52,7 @@
       </tr>
     </thead>
     <tbody>
-      {% for item in ctx.fee_items %}
+      {% for item in ctx.line_items %}
       <tr>
         <td>{{ item.description }}</td>
         <td class="sid-text-right">{{ item.formatted_amount }}</td>
@@ -94,7 +94,7 @@
       <td class="sid-notes">
         <div class="sid-footer-title">NOTES:</div>
         {% if ctx.notes %}<div class="sid-notes-text">{{ ctx.notes | replace("\n", "<br>") }}</div>{% endif %}
-        {% if ctx.term_opening_date %}<div><b>Official School Opening Date</b> {{ ctx.term_opening_date }}</div>{% endif %}
+        {% if ctx.term_opening_date %}<div><b>Official Opening Date</b> {{ ctx.term_opening_date }}</div>{% endif %}
         {% if ctx.company.email %}<div>Please email your remittance and any queries to: <b>{{ ctx.company.email }}</b></div>{% endif %}
       </td>
     </tr>

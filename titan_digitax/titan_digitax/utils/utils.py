@@ -35,8 +35,8 @@ def digitax_callback_sales_with_items():
             }
 
         # A token identifies the company the callback was issued for. When present,
-        # the invoice lookup is scoped to that company so a callback for one school
-        # can never land on another school's invoice.
+        # the invoice lookup is scoped to that company so a callback for one company
+        # can never land on another company's invoice.
         from titan_digitax.titan_digitax.utils.company_config import (
             get_company_for_callback_token,
         )

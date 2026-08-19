@@ -9,7 +9,7 @@ class DigitaxItem(Document):
 	"""One row per (company, catalogue item). Docname is
 	"{item_name}({company_abbr})" — item_name is the literal string sent to
 	DigiTax and is deliberately NOT unique across companies; two companies can
-	each have their own row titled "School Fees".
+	each have their own row titled "Consulting Fees".
 	"""
 
 	def autoname(self):

@@ -1,10 +1,10 @@
 # Copyright (c) 2026, Titan and contributors
 # For license information, please see license.txt
 
-"""Resolve a school app's discount-redistribution logic without hard-coding an import.
+"""Resolve a client app's discount-redistribution logic without hard-coding an import.
 
 Same shape as actionable.py's Actionable Item resolver - `titan_digitax` is shared
-across clients, so it must not assume any particular school/MIS's data model. A
+across clients, so it must not assume any particular client/MIS's data model. A
 negative-amount Sales Invoice line ("this line is actually a discount") is not
 something standard ERPNext discount entry (Discount %/Discount Amount) ever
 produces on its own - it only shows up here because a specific MIS integration
@@ -17,7 +17,7 @@ A handler is discovered in one of two ways:
 1. It declares a handler in its ``hooks.py`` (preferred, explicit)::
 
        digitax_discount_redistribution_handler = (
-           "my_school.utils.digitax_discount.redistribute_discount"
+           "my_client_app.utils.digitax_discount.redistribute_discount"
        )
 
 2. Otherwise every installed app is probed for the conventional path

@@ -1060,8 +1060,8 @@ def resolve_digitax_customer_pin(doc):
     """
     Resolve the customer PIN for Digitax payloads.
 
-    Parent is the operational source in Braeburn, while Customer and Sales
-    Invoice are retained as fallbacks for older data.
+    Parent is the primary operational source for this pin, while Customer and
+    Sales Invoice are retained as fallbacks for older data.
     """
     parent_code = getattr(doc, "parent_code", None)
     if parent_code:

@@ -224,7 +224,7 @@ def get_digitax_print_items(doc, digitax_settings=None):
 	dry_run=True: this is a read-only print action, never write/commit/raise an
 	Actionable Item just because someone opened Print. If gates fail (e.g. missing
 	item links), falls back to the raw invoice lines so the printout isn't empty,
-	same pattern as get_school_invoice_print_context.
+	same pattern as get_sales_invoice_digitax_print_context.
 	"""
 	if digitax_settings is None:
 		from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
@@ -439,7 +439,7 @@ def get_digitax_print_context(doc):
 	}
 
 
-def get_school_invoice_print_context(doc):
+def get_sales_invoice_digitax_print_context(doc):
 	"""Build the print context used by the Sales Invoice(Digitax) print format.
 
 	The Fees table shows the actual item(s) built by build_digitax_items_payload —
@@ -473,7 +473,7 @@ def get_school_invoice_print_context(doc):
 		raw_items = built["items"]
 		items = [
 			{
-				"description": entry.get("item_name") or entry.get("item_description") or "School Fees",
+				"description": entry.get("item_name") or entry.get("item_description") or "Item",
 				"amount": entry.get("total_amount") or 0,
 				"formatted_amount": fmt_money(entry.get("total_amount") or 0, currency=currency),
 			}
@@ -523,7 +523,7 @@ def get_school_invoice_print_context(doc):
 			"name": doc.customer_name or doc.customer or "",
 			"account_code": customer_code,
 		},
-		"fee_items": items,
+		"line_items": items,
 		"currency": currency,
 		"formatted_invoice_total": fmt_money(invoice_total, currency=currency),
 		"formatted_total_due": fmt_money(abs(doc.outstanding_amount or 0), currency=currency),

@@ -88,7 +88,7 @@ jinja = {
 	"methods": [
 		"titan_digitax.titan_digitax.utils.print_format.get_digitax_print_context",
 		"titan_digitax.titan_digitax.utils.print_format.get_qr_code_data_uri",
-		"titan_digitax.titan_digitax.utils.print_format.get_school_invoice_print_context",
+		"titan_digitax.titan_digitax.utils.print_format.get_sales_invoice_digitax_print_context",
 	],
 }
 

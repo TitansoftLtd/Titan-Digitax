@@ -100,7 +100,7 @@ class TestDigitaxCompanyConfig(FrappeTestCase):
 
     def test_other_company_enabled_but_not_queried(self):
         _make_company_settings_doc("Acme Kenya", enabled=1)
-        self.assertFalse(is_digitax_enabled_for_company("Braeburn Nairobi"))
+        self.assertFalse(is_digitax_enabled_for_company("Acme Uganda"))
 
     def test_empty_company_arg_returns_false(self):
         _make_company_settings_doc("Acme Kenya", enabled=1)
