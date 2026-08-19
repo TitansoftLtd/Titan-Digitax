@@ -30,6 +30,17 @@ DUPLICATE_TRADER_INVOICE_MESSAGE = "trader_invoice_number has already been used"
 # multiple hourly runs instead of one sweep trying to process everything at once.
 DEFAULT_RETRY_BATCH_SIZE = 100
 
+# Backoff schedule for ordinary per-invoice retries, keyed by custom_retry_count
+# (how many attempts have already failed). retry_count 0 - the very first failure -
+# is retried on the next hourly sweep with no artificial delay, matching the old
+# flat-cadence behavior for a fresh failure. Every attempt after that waits
+# progressively longer, since an invoice still failing after several tries is
+# almost always broken in a way an hourly retry won't fix - retrying it every
+# hour just burns through its retry budget faster without improving the odds.
+# Any retry_count beyond what's listed here is capped at RETRY_BACKOFF_MAX_HOURS.
+RETRY_BACKOFF_SCHEDULE_HOURS = {1: 1, 2: 4}
+RETRY_BACKOFF_MAX_HOURS = 24
+
 # Cache key tracking the currently-running (if any) hourly retry sweep, so a slow
 # sweep can't have a second one start on top of it, and so a sweep that's stopped
 # making progress can be detected and recovered from automatically.
@@ -296,6 +307,14 @@ def _send_sales_invoice_to_digitax_impl(docname):
         logger.info(f"Retry detected: Current retry count = {current_retry_count}")
         frappe.db.set_value("Sales Invoice", doc.name, "custom_retry_count", current_retry_count + 1, update_modified=False)
 
+    # Stamp every genuine attempt (first send or retry) regardless of outcome, so the
+    # hourly retry sweep can back off between attempts on a failing invoice instead of
+    # hammering it every hour - see RETRY_BACKOFF_SCHEDULE_HOURS in
+    # retry_sending_sales_invoice_to_digitax.
+    frappe.db.set_value(
+        "Sales Invoice", doc.name, "custom_last_digitax_attempt_at", now_datetime(), update_modified=False
+    )
+
     endpoint = ""
     # Get invoice status codes from settings
     submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
@@ -479,6 +498,42 @@ def _send_sales_invoice_to_digitax_impl(docname):
     logger.info(f"=" * 80)
     return response_data
 
+def _backoff_hours_for_retry_count(retry_count):
+    if retry_count <= 0:
+        return 0
+    return RETRY_BACKOFF_SCHEDULE_HOURS.get(retry_count, RETRY_BACKOFF_MAX_HOURS)
+
+
+def _raise_retry_budget_exhausted_actionable_item(invoice_name, company, retry_count, max_retry_attempts):
+    # No dedup marker needed: the sweep's own query filter (custom_retry_count <
+    # max_retry_attempts) means an invoice crosses this threshold exactly once - once
+    # custom_retry_count reaches max_retry_attempts it drops out of every future
+    # sweep's query entirely, so this can never fire twice for the same invoice unless
+    # someone resets custom_retry_count (a deliberate re-enable, which should raise
+    # again). create_actionable_item's own dedup-by-title/type/reference is still the
+    # backstop if that assumption is ever wrong.
+    create_actionable_item(
+        title=f"Digitax Retry Budget Exhausted: {invoice_name}",
+        item_type="Digitax Retry Exhausted",
+        description=(
+            f"<p><strong>Sales Invoice:</strong> {invoice_name} has failed to send to Digitax "
+            f"{retry_count} time(s), reaching this company's max_retry_attempts "
+            f"({max_retry_attempts}). The hourly retry sweep will no longer pick it up - its "
+            f"custom_retry_count ({retry_count}) no longer satisfies the sweep's own "
+            f"custom_retry_count &lt; max_retry_attempts filter.</p>"
+            f"<p>See custom_error_message on the invoice for the last failure reason.</p>"
+        ),
+        action_required=(
+            "Investigate and resolve the underlying failure, then reset custom_retry_count "
+            "(or raise max_retry_attempts) to re-enter the retry sweep"
+        ),
+        reference_doctype="Sales Invoice",
+        reference_name=invoice_name,
+        company=company,
+        priority="High",
+    )
+
+
 @frappe.whitelist()
 def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from_date=None, to_date=None, retry_count=None):
     # This is a bulk action spanning potentially every company - not scoped to
@@ -571,23 +626,48 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
                 invoices = frappe.get_all(
                     "Sales Invoice",
                     filters=filters,
-                    pluck="name",
+                    fields=["name", "custom_retry_count", "custom_last_digitax_attempt_at"],
                     order_by="custom_retry_count asc, posting_date asc",
                     limit_page_length=comp_batch_size,
                 )
                 if invoices:
                     found_any_this_round = True
 
-                attempted += len(invoices)
-                attempted_this_run.update(invoices)
+                # Every fetched invoice counts as attempted-this-run even if the backoff
+                # check below skips it - it won't clear its backoff window within this
+                # sweep's short lifetime anyway, so without this the same skipped invoice
+                # would be re-fetched (and re-skipped) every round, looping until the
+                # sweep's time budget ran out instead of moving on to the rest of the
+                # backlog.
+                attempted_this_run.update(row.name for row in invoices)
 
-                for invoice in invoices:
+                now = now_datetime()
+                due_invoices = []
+                for row in invoices:
+                    backoff_hours = _backoff_hours_for_retry_count(row.custom_retry_count or 0)
+                    if backoff_hours and row.custom_last_digitax_attempt_at:
+                        next_eligible_at = add_to_date(row.custom_last_digitax_attempt_at, hours=backoff_hours)
+                        if now < next_eligible_at:
+                            continue  # still inside this retry's backoff window - try again next sweep
+                    due_invoices.append(row.name)
+
+                attempted += len(due_invoices)
+
+                for invoice in due_invoices:
                     try:
                         send_sales_invoice_to_digitax_automatic(invoice)
                     except Exception as e:
                         errors.append(f"{invoice}: {e}")
                     finally:
                         _touch_retry_sweep_progress()
+
+                    sent, invoice_retry_count = frappe.db.get_value(
+                        "Sales Invoice", invoice, ["custom_sent_to_digitax", "custom_retry_count"]
+                    )
+                    if not sent and (invoice_retry_count or 0) >= comp_retry_count:
+                        _raise_retry_budget_exhausted_actionable_item(
+                            invoice, comp, invoice_retry_count, comp_retry_count
+                        )
 
             if not is_full_sweep:
                 break  # targeted call - exactly one pass, as before
