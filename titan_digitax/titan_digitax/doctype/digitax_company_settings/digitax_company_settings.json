@@ -43,9 +43,7 @@
   "default_quantity_unit_code",
   "school_fees_item_section",
   "default_item_bar_code",
-  "default_item_name",
   "column_break_school_fees",
-  "default_item_description",
   "default_is_stockable",
   "invoice_status_codes_section",
   "submitted_invoice_status_code",
@@ -319,22 +317,8 @@
    "label": "Default Item Bar Code"
   },
   {
-   "default": "School Fees",
-   "description": "Default item name used when a line has no matching Digitax Item (default: School Fees)",
-   "fieldname": "default_item_name",
-   "fieldtype": "Data",
-   "label": "Default Item Name"
-  },
-  {
    "fieldname": "column_break_school_fees",
    "fieldtype": "Column Break"
-  },
-  {
-   "default": "School Fees",
-   "description": "Default item description used when a line has no matching Digitax Item (default: School Fees)",
-   "fieldname": "default_item_description",
-   "fieldtype": "Data",
-   "label": "Default Item Description"
   },
   {
    "default": "0",
