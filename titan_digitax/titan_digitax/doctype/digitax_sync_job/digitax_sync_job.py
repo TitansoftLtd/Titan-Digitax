@@ -282,23 +282,49 @@ def sync_invoices_to_digitax(company, job_id=None):
 	# not a per-invoice interactive send. Using the checked wrapper here would
 	# additionally require whoever clicked Execute to separately hold send_role
 	# too, even though they already passed a stricter gate to get here.
-	from titan_digitax.titan_digitax.utils.sales import send_sales_invoice_to_digitax_automatic
+	from titan_digitax.titan_digitax.utils.sales import DEFAULT_RETRY_BATCH_SIZE, send_sales_invoice_to_digitax_automatic
 
+	try:
+		batch_size = int(settings.get("retry_batch_size") or DEFAULT_RETRY_BATCH_SIZE)
+		if batch_size <= 0:
+			batch_size = DEFAULT_RETRY_BATCH_SIZE
+	except (ValueError, TypeError):
+		batch_size = DEFAULT_RETRY_BATCH_SIZE
+
+	invoice_filters = {
+		"docstatus": 1,
+		"custom_sent_to_digitax": 0,
+		"company": company,
+		"custom_retry_count": ["<", retry_count],
+	}
+
+	# Same reasoning as the hourly retry sweep (F8): an unbounded fetch here risks
+	# one Execute click trying to process an entire backlog in a single job run,
+	# with no resumability if it's interrupted. Reuses the same per-company
+	# retry_batch_size setting rather than inventing a second one - oldest first,
+	# same as the sweep, so which invoices get through first is predictable.
+	backlog_total = frappe.db.count("Sales Invoice", invoice_filters)
 	invoices = frappe.get_all(
 		"Sales Invoice",
-		filters={
-			"docstatus": 1,
-			"custom_sent_to_digitax": 0,
-			"company": company,
-			"custom_retry_count": ["<", retry_count],
-		},
+		filters=invoice_filters,
 		pluck="name",
+		order_by="posting_date asc",
+		limit_page_length=batch_size,
 	)
 
 	total = len(invoices)
+	if backlog_total > total:
+		# No silent truncation - if the backlog is bigger than one batch, say so
+		# up front rather than quietly under-reporting "Attempted" against the
+		# true total. The rest stays picked up by the hourly retry sweep, or the
+		# next manual Execute.
+		found_message = f"Found {total} of {backlog_total} unsent invoice(s) for {company} (batch capped at {batch_size})"
+	else:
+		found_message = f"Found {total} unsent invoice(s) for {company}"
+
 	_update_job_record(
 		job_id=job_id, total_records=total, percentage_complete=20,
-		last_message=f"Found {total} unsent invoice(s) for {company}",
+		last_message=found_message,
 	)
 
 	errors = []
@@ -315,7 +341,9 @@ def sync_invoices_to_digitax(company, job_id=None):
 				percentage_complete=percentage, last_message=f"Processed {idx}/{total}: {invoice}",
 			)
 
-	still_unsent = (
+	# The IN-list here is naturally bounded now too, since invoices is capped at
+	# batch_size rather than the whole backlog.
+	still_unsent_in_batch = (
 		frappe.db.count(
 			"Sales Invoice",
 			{"docstatus": 1, "custom_sent_to_digitax": 0, "company": company, "name": ["in", invoices]},
@@ -323,16 +351,20 @@ def sync_invoices_to_digitax(company, job_id=None):
 		if invoices
 		else 0
 	)
-	sent = max(total - still_unsent, 0)
+	sent = max(total - still_unsent_in_batch, 0)
+	not_attempted = max(backlog_total - total, 0)
+	still_unsent_overall = still_unsent_in_batch + not_attempted
 
-	summary = f"Invoices synced to Digitax: Attempted={total}, Sent={sent}, Still Unsent={still_unsent}"
+	summary = f"Invoices synced to Digitax: Attempted={total}, Sent={sent}, Still Unsent={still_unsent_overall}"
+	if not_attempted:
+		summary += f" ({not_attempted} not attempted this run - batch capped at {batch_size})"
 	frappe.logger().info(summary)
 
 	return {
 		"summary": summary,
 		"created": sent,
 		"updated": 0,
-		"skipped": still_unsent,
+		"skipped": still_unsent_overall,
 		"errors": errors,
 	}
 
