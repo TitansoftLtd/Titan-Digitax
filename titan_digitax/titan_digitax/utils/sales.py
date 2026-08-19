@@ -1147,30 +1147,6 @@ def _get_trader_invoice_base(doc):
     return str(doc.custom_trader_invoice_number or (doc.name.replace("/", "_") if doc.name else ""))
 
 
-def _get_default_digitax_item(doc, digitax_settings, include_sale_fields):
-    amount = abs(doc.grand_total)
-    item = {
-        "item_bar_code": digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES",
-        "quantity": 1,
-        "unit_price": amount,
-        "total_amount": amount,
-        "package_unit_quantity": amount,
-        "discount_rate": 0,
-        "discount_amount": 0,
-        "item_description": digitax_settings.get("default_item_description") or "School Fees",
-    }
-
-    if include_sale_fields:
-        item.update({
-            "item_name": digitax_settings.get("default_item_name") or "School Fees",
-            "item_class_code": digitax_settings.get("default_item_class_code") or "99020000",
-            "item_tax_type_code": digitax_settings.get("default_item_tax_type_code") or "D",
-            "is_stockable": bool(digitax_settings.get("default_is_stockable")),
-        })
-
-    return item
-
-
 def _get_digitax_correction_date():
     """Use UTC date so correction events are never ahead of Digitax's server date."""
     return datetime.now(timezone.utc).date().isoformat()
@@ -1408,6 +1384,20 @@ def _ensure_original_sale_row(doc):
     if not doc.custom_sale_id:
         frappe.throw(_("Original Digitax sale ID is missing. Cannot start a virtual amendment."))
 
+    # Best-effort real amount from the invoice's current items (N6), same as the
+    # reversal/virtual-sale rows below - this is only a summary display value for
+    # the amendment history table (the actual original send's exact payload was
+    # never stored, see N6 notes), so a gate failure here falls back to the old
+    # grand_total approximation rather than blocking - this call must never stop
+    # someone from viewing/starting an amendment just because current item master
+    # data has since drifted.
+    logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
+    original_digitax_settings = get_digitax_settings(doc.company)
+    built = build_digitax_items_payload(doc, original_digitax_settings, logger, dry_run=True)
+    original_amount = (
+        sum(float(i.get("total_amount") or 0) for i in built["items"]) if built.get("ok") else abs(doc.grand_total)
+    )
+
     row = doc.append("custom_digitax_amendments", {
         "amendment_type": "Original Sale",
         "trader_invoice_number": _get_trader_invoice_base(doc),
@@ -1423,7 +1413,7 @@ def _ensure_original_sale_row(doc):
         "original_sale_id": doc.custom_original_sale_id,
         "digitax_date": doc.custom_date,
         "digitax_time": doc.custom_time,
-        "amount": abs(doc.grand_total),
+        "amount": original_amount,
         "customer_pin_after": doc.tax_id,
         "customer_pin_source_after": "Sales Invoice",
         "customer_name_after": doc.customer_name,
@@ -1499,11 +1489,30 @@ def _throw_if_sent_trader_exists(doc, trader_invoice_number):
             frappe.throw(_("Digitax amendment {0} has already been sent.").format(trader_invoice_number))
 
 
-def _build_virtual_reversal_payload(doc, digitax_settings, state):
+def _build_virtual_reversal_payload(doc, digitax_settings, state, logger):
+    """Build a real credit-note payload from this invoice's actual items (N6) -
+    replaces the old synthetic single-line item. include_sale_fields=False is
+    passed explicitly rather than relying on doc.is_return: which endpoint
+    shape is needed depends on the amendment action (this is a reversal), not
+    on whether the *original* invoice was itself a return.
+
+    Subject to the same item-link/sync gates a normal send goes through (an
+    invoice whose items aren't fully linked to Digitax Items is blocked here
+    too, same as a normal send would be) - a deliberate choice over silently
+    bypassing them for amendments, since a broken/incomplete item link is a
+    real data problem worth surfacing rather than filing anyway.
+
+    Returns {"ok": True, "payload": ..., "items": ...} or the {"ok": False,
+    ...} shape straight from build_digitax_items_payload on a gate failure.
+    """
+    built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=False, include_sale_fields=False)
+    if not built.get("ok"):
+        return built
+
     submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
     payload = {
         "trader_invoice_number": state["next_reversal_trader_invoice_number"],
-        "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=False)],
+        "items": built["items"],
         "invoice_status_code": submitted_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "return_date": _get_digitax_correction_date(),
@@ -1515,14 +1524,22 @@ def _build_virtual_reversal_payload(doc, digitax_settings, state):
         payload["customer_tin"] = str(customer_pin.get("pin"))
         payload["customer_name"] = str(doc.customer_name)
 
-    return payload
+    return {"ok": True, "payload": payload, "items": built["items"]}
 
 
-def _build_virtual_sale_payload(doc, digitax_settings, state):
+def _build_virtual_sale_payload(doc, digitax_settings, state, logger):
+    """Build a real sales-with-items payload from this invoice's actual items
+    (N6) - see _build_virtual_reversal_payload for the shared design notes
+    (real items, explicit include_sale_fields, gates apply).
+    """
+    built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=False, include_sale_fields=True)
+    if not built.get("ok"):
+        return built
+
     submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
     payload = {
         "trader_invoice_number": state["next_sale_trader_invoice_number"],
-        "items": [_get_default_digitax_item(doc, digitax_settings, include_sale_fields=True)],
+        "items": built["items"],
         "invoice_status_code": submitted_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "sale_date": _get_digitax_correction_date(),
@@ -1535,7 +1552,7 @@ def _build_virtual_sale_payload(doc, digitax_settings, state):
         payload["customer_tin"] = str(customer_pin.get("pin"))
         payload["customer_name"] = str(doc.customer_name)
 
-    return payload
+    return {"ok": True, "payload": payload, "items": built["items"]}
 
 
 def _post_virtual_amendment(url, payload, digitax_settings, logger, company=None):
@@ -1603,14 +1620,24 @@ def _json_dump(data):
     return json.dumps(data or {}, indent=2, default=str)
 
 
-def _build_preview_response(action, doc, trader_invoice_number, correction_reason, before_values, after_values):
+def _build_preview_response(action, doc, trader_invoice_number, correction_reason, before_values, after_values, items):
+    """items is this amendment's real Digitax item list (N6) - the amount and
+    item breakdown shown here now reflect what will actually be sent, not the
+    old fake single "School Fees" line.
+    """
     return {
         "action": action,
         "invoice_name": doc.name,
         "customer": doc.customer_name,
         "trader_invoice_number": trader_invoice_number,
-        "amount": abs(doc.grand_total),
-        "item": "School Fees",
+        "amount": sum(float(i.get("total_amount") or 0) for i in items),
+        "items": [
+            {
+                "description": i.get("item_description") or i.get("item_name") or "",
+                "amount": i.get("total_amount"),
+            }
+            for i in items
+        ],
         "correction_reason": correction_reason,
         "before": before_values,
         "after": after_values,
@@ -1618,8 +1645,9 @@ def _build_preview_response(action, doc, trader_invoice_number, correction_reaso
     }
 
 
-def _build_virtual_reversal_preview(doc, state, correction_reason):
+def _build_virtual_reversal_preview(doc, state, correction_reason, items):
     customer_pin = resolve_digitax_customer_pin(doc)
+    total_amount = sum(float(i.get("total_amount") or 0) for i in items)
     return _build_preview_response(
         "Virtual Credit Note",
         doc,
@@ -1628,23 +1656,25 @@ def _build_virtual_reversal_preview(doc, state, correction_reason):
         {
             "Digitax Sale ID": state.get("active_sale_id"),
             "Trader Invoice No.": state.get("active_trader_invoice_number"),
-            "Amount": abs(doc.grand_total),
+            "Amount": total_amount,
             "Status": "Active Digitax Sale",
         },
         {
             "Digitax Sale ID": "No active sale until corrected virtual sale is sent",
             "Trader Invoice No.": state["next_reversal_trader_invoice_number"],
-            "Amount": abs(doc.grand_total),
+            "Amount": total_amount,
             "Status": "Awaiting Corrected Virtual Sale",
             "Correction Reason": correction_reason,
             "Customer PIN": customer_pin.get("pin") or "Not provided",
             "PIN Source": customer_pin.get("source"),
         },
+        items,
     )
 
 
-def _build_virtual_sale_preview(doc, state, correction_reason):
+def _build_virtual_sale_preview(doc, state, correction_reason, items):
     customer_pin = resolve_digitax_customer_pin(doc)
+    total_amount = sum(float(i.get("total_amount") or 0) for i in items)
     return _build_preview_response(
         "Virtual Sale",
         doc,
@@ -1656,7 +1686,7 @@ def _build_virtual_sale_preview(doc, state, correction_reason):
             "Customer Name": doc.customer_name,
             "Trader Invoice No.": "Awaiting corrected virtual sale",
             "Digitax Sale ID": "No active sale",
-            "Amount": abs(doc.grand_total),
+            "Amount": total_amount,
         },
         {
             "Customer PIN": customer_pin.get("pin") or "Not provided",
@@ -1664,9 +1694,10 @@ def _build_virtual_sale_preview(doc, state, correction_reason):
             "Customer Name": doc.customer_name,
             "Trader Invoice No.": state["next_sale_trader_invoice_number"],
             "Digitax Sale ID": "New sale will be created",
-            "Amount": abs(doc.grand_total),
+            "Amount": total_amount,
             "Correction Reason": correction_reason,
         },
+        items,
     )
 
 
@@ -1711,25 +1742,39 @@ def get_digitax_virtual_amendment_status(invoice_name):
 @frappe.whitelist()
 def preview_virtual_digitax_reversal(invoice_name, correction_reason=None):
     correction_reason = _require_correction_reason(correction_reason)
+    logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
     doc, digitax_settings = _load_virtual_amendment_context(invoice_name)
     state = _get_virtual_amendment_state(doc)
 
     if not state.get("active_sale_id"):
         frappe.throw(_("There is no active Digitax sale to reverse. Send the corrected virtual sale first if a reversal was already sent."))
 
-    return _build_virtual_reversal_preview(doc, state, correction_reason)
+    # dry_run=True: this is a preview, never write/commit/raise an Actionable
+    # Item just because someone opened the confirmation dialog - but a gate
+    # failure still blocks the preview (same policy as the actual send) so a
+    # user finds out about a missing item link before clicking Send, not after.
+    built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True, include_sale_fields=False)
+    if not built.get("ok"):
+        frappe.throw(built.get("message") or _("Unable to build Digitax items for this reversal."))
+
+    return _build_virtual_reversal_preview(doc, state, correction_reason, built["items"])
 
 
 @frappe.whitelist()
 def preview_virtual_digitax_sale(invoice_name, correction_reason=None):
     correction_reason = _require_correction_reason(correction_reason)
+    logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
     doc, digitax_settings = _load_virtual_amendment_context(invoice_name)
     state = _get_virtual_amendment_state(doc)
 
     if state.get("active_sale_id"):
         frappe.throw(_("Send a virtual reversal before sending a corrected virtual sale."))
 
-    return _build_virtual_sale_preview(doc, state, correction_reason)
+    built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True, include_sale_fields=True)
+    if not built.get("ok"):
+        frappe.throw(built.get("message") or _("Unable to build Digitax items for this virtual sale."))
+
+    return _build_virtual_sale_preview(doc, state, correction_reason, built["items"])
 
 
 @frappe.whitelist()
@@ -1747,8 +1792,20 @@ def send_virtual_digitax_reversal(invoice_name, correction_reason=None):
     trader_invoice_number = state["next_reversal_trader_invoice_number"]
     _throw_if_sent_trader_exists(doc, trader_invoice_number)
 
-    payload = _build_virtual_reversal_payload(doc, digitax_settings, state)
-    preview = _build_virtual_reversal_preview(doc, state, correction_reason)
+    built = _build_virtual_reversal_payload(doc, digitax_settings, state, logger)
+    if not built.get("ok"):
+        # A gate failure (e.g. missing/unsynced Digitax Item link) - nothing was
+        # sent, so no amendment row is recorded. build_digitax_items_payload has
+        # already written custom_error_message and raised an Actionable Item.
+        return {
+            "success": False,
+            "skipped": True,
+            "reason": built.get("reason"),
+            "message": built.get("message"),
+        }
+
+    payload = built["payload"]
+    preview = _build_virtual_reversal_preview(doc, state, correction_reason, built["items"])
     response_data, status_code = _post_virtual_amendment(
         "credit-notes-with-barcode", payload, digitax_settings, logger, company=doc.company
     )
@@ -1759,7 +1816,7 @@ def send_virtual_digitax_reversal(invoice_name, correction_reason=None):
         "trader_invoice_number": trader_invoice_number,
         "reference_sale_id": state["active_sale_id"],
         "status": "Sent" if success else "Failed",
-        "amount": abs(doc.grand_total),
+        "amount": sum(float(i.get("total_amount") or 0) for i in built["items"]),
         "correction_reason": correction_reason,
         "preview_before": _json_dump(preview.get("before")),
         "preview_after": _json_dump(preview.get("after")),
@@ -1795,8 +1852,17 @@ def send_virtual_digitax_sale(invoice_name, correction_reason=None):
     trader_invoice_number = state["next_sale_trader_invoice_number"]
     _throw_if_sent_trader_exists(doc, trader_invoice_number)
 
-    payload = _build_virtual_sale_payload(doc, digitax_settings, state)
-    preview = _build_virtual_sale_preview(doc, state, correction_reason)
+    built = _build_virtual_sale_payload(doc, digitax_settings, state, logger)
+    if not built.get("ok"):
+        return {
+            "success": False,
+            "skipped": True,
+            "reason": built.get("reason"),
+            "message": built.get("message"),
+        }
+
+    payload = built["payload"]
+    preview = _build_virtual_sale_preview(doc, state, correction_reason, built["items"])
     response_data, status_code = _post_virtual_amendment(
         "sales-with-items", payload, digitax_settings, logger, company=doc.company
     )
@@ -1807,7 +1873,7 @@ def send_virtual_digitax_sale(invoice_name, correction_reason=None):
         "amendment_type": "Virtual Sale",
         "trader_invoice_number": trader_invoice_number,
         "status": "Sent" if success else "Failed",
-        "amount": abs(doc.grand_total),
+        "amount": sum(float(i.get("total_amount") or 0) for i in built["items"]),
         "customer_pin_before": doc.tax_id,
         "customer_pin_after": customer_pin.get("pin"),
         "customer_pin_source_before": "Sales Invoice" if doc.tax_id else "Not Provided",

@@ -18,7 +18,7 @@ def _round_qty1_amount(amount):
 	return 1, total, total
 
 
-def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=False):
+def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=False, include_sale_fields=None):
 	"""
 	Collect SI lines, apply D14 gates, aggregate by DigiTax display name,
 	redistribute discounts, return DigiTax items[] or a skip/error dict.
@@ -29,6 +29,15 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=Fals
 	that only need to know WHAT would be sent (e.g. building a print preview),
 	not actually record a failed send. The real send path never sets this.
 
+	include_sale_fields controls whether each item gets the sale-only fields
+	(item_name, item_class_code, item_tax_type_code, is_stockable) needed for
+	sales-with-items, or omits them for credit-notes-with-barcode. Defaults to
+	None, which derives it from doc.is_return - correct for a normal send,
+	where the endpoint is determined by the invoice's own nature. A virtual
+	amendment must pass this explicitly instead: which endpoint it's building
+	for depends on the amendment action (reversal vs. corrected sale), not on
+	whether the *original* invoice happened to be a return.
+
 	Returns:
 		dict with either:
 		  {"ok": True, "items": [...]}
@@ -38,6 +47,7 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=Fals
 
 	require_name = bool(digitax_settings.get("require_digitax_item_name", 1))
 	require_sync = bool(digitax_settings.get("require_manual_item_sync", 1))
+	use_sale_fields = (not doc.is_return) if include_sale_fields is None else include_sale_fields
 
 	gate_failures = []
 	items_dict = {}  # display_name -> aggregated line
@@ -151,7 +161,7 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=Fals
 			# and are only meaningful on the sales side; credit notes reference an
 			# already-registered item by id/barcode instead.
 			entry["item_bar_code"] = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
-			if not doc.is_return:
+			if use_sale_fields:
 				entry["item_name"] = display_name
 				entry["item_class_code"] = (
 					(digitax_item.item_class_code if digitax_item else None)
