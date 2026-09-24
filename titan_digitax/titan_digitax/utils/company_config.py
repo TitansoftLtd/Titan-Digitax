@@ -62,6 +62,17 @@ def is_digitax_enabled_for_company(company):
     return company in set(get_enabled_digitax_companies())
 
 
+def is_automatic_invoice_sending_blocked(company):
+    """True when this company holds invoices/credit notes back from every automatic
+    Digitax send path (on-submit, hourly retry sweep) - D21. Manual sends are still
+    possible, but only through the two user-initiated entrypoints that ask the user
+    to confirm first (the Sales Invoice button, and a Digitax Sync invoice run).
+    """
+    if not company:
+        return False
+    return bool(frappe.db.get_value(COMPANY_DOCTYPE, company, "block_automatic_invoice_sending"))
+
+
 def get_digitax_settings(company):
     """Return this company's Digitax Company Settings doc. Throws if none exists.
 

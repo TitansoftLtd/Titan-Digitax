@@ -11,6 +11,9 @@
   "direction",
   "sync_type",
   "company",
+  "from_date",
+  "to_date",
+  "sent_despite_block",
   "status",
   "percentage_complete",
   "started_at",
@@ -58,6 +61,28 @@
    "in_standard_filter": 1,
    "label": "Company",
    "options": "Company",
+   "read_only": 1
+  },
+  {
+   "description": "Invoice sync only: earliest posting date included. Blank = no lower bound.",
+   "fieldname": "from_date",
+   "fieldtype": "Date",
+   "label": "From Date",
+   "read_only": 1
+  },
+  {
+   "description": "Invoice sync only: latest posting date included. Blank = no upper bound.",
+   "fieldname": "to_date",
+   "fieldtype": "Date",
+   "label": "To Date",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "description": "The company had Block Automatic Invoice Sending on, and the user who started this run confirmed sending anyway.",
+   "fieldname": "sent_despite_block",
+   "fieldtype": "Check",
+   "label": "Sent Despite Automatic-Send Block",
    "read_only": 1
   },
   {
@@ -142,7 +167,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-07 10:00:00.000000",
+ "modified": "2026-09-24 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Sync Job",

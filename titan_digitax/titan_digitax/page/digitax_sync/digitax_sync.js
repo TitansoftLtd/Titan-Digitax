@@ -47,6 +47,19 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
                                     <option value="">${__("Select Direction first")}</option>
                                 </select>
                             </div>
+                            <div class="row mt-2" data-fieldname="date-range-group" style="display:none;">
+                                <div class="col-sm-6">
+                                    <label class="control-label">${__("From Date")}</label>
+                                    <div data-fieldname="from-date-control"></div>
+                                </div>
+                                <div class="col-sm-6">
+                                    <label class="control-label">${__("To Date")}</label>
+                                    <div data-fieldname="to-date-control"></div>
+                                </div>
+                                <div class="col-12 text-muted" style="font-size: 12px;">
+                                    ${__("Optional. Only unsent invoices and credit notes posted in this range are sent. Leave blank for all unsent.")}
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -153,7 +166,33 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
 		});
 	}
 
-	directionSelect.on("change", updateSyncTypeOptions);
+	// Posting-date range - only meaningful for To DigiTax > Invoices.
+	const dateRangeGroup = $layout.find('[data-fieldname="date-range-group"]');
+	const makeDateControl = (fieldname, parent) => {
+		const control = frappe.ui.form.make_control({
+			df: { fieldtype: "Date", fieldname },
+			parent: $layout.find(parent),
+			render_input: true,
+		});
+		control.refresh();
+		return control;
+	};
+	const fromDateField = makeDateControl("from_date", '[data-fieldname="from-date-control"]');
+	const toDateField = makeDateControl("to_date", '[data-fieldname="to-date-control"]');
+
+	function isInvoiceSync() {
+		return directionSelect.val() === "To DigiTax" && syncTypeSelect.val() === "Invoices";
+	}
+
+	function updateDateRangeVisibility() {
+		dateRangeGroup.toggle(isInvoiceSync());
+	}
+
+	directionSelect.on("change", () => {
+		updateSyncTypeOptions();
+		updateDateRangeVisibility();
+	});
+	syncTypeSelect.on("change", updateDateRangeVisibility);
 	updateSyncTypeOptions();
 
 	// Job list functions
@@ -210,6 +249,10 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
 			[__("Direction"), frappe.utils.escape_html(job.direction || "-")],
 			[__("Sync Type"), frappe.utils.escape_html(job.sync_type || "-")],
 			[__("Company"), frappe.utils.escape_html(job.company || "-")],
+			[__("Date Range"), job.from_date || job.to_date
+				? `${job.from_date ? frappe.datetime.str_to_user(job.from_date) : __("Any")} - ${job.to_date ? frappe.datetime.str_to_user(job.to_date) : __("Any")}`
+				: "-"],
+			[__("Sent Despite Block"), job.sent_despite_block ? __("Yes") : __("No")],
 			[__("Status"), getStatusBadge(job.status)],
 			[__("Progress"), `${job.percentage_complete || 0}%`],
 			[__("Records"), `${job.processed_records || 0} / ${job.total_records || 0}`],
@@ -494,8 +537,35 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
 		}
 
 		const preposition = direction === "To DigiTax" ? __("to") : __("from");
+		const from_date = isInvoiceSync() ? fromDateField.get_value() || null : null;
+		const to_date = isInvoiceSync() ? toDateField.get_value() || null : null;
 
-		frappe.confirm(__("Are you sure you want to sync {0} {1} Digitax for {2}?", [sync_type, preposition, company]), function () {
+		if (from_date && to_date && from_date > to_date) {
+			frappe.msgprint({
+				title: __("Invalid Date Range"),
+				message: __("From Date cannot be after To Date."),
+				indicator: "orange",
+			});
+			return;
+		}
+
+		let scope = "";
+		if (from_date || to_date) {
+			scope = " " + __("posted {0} to {1}", [
+				from_date ? frappe.datetime.str_to_user(from_date) : __("any date"),
+				to_date ? frappe.datetime.str_to_user(to_date) : __("any date"),
+			]);
+		}
+
+		function resetToReady() {
+			executeBtn.prop("disabled", false);
+			progressBar.removeClass("progress-bar-animated bg-primary").addClass("bg-secondary");
+			progressMessage.text(__("Ready to sync"));
+		}
+
+		// send_anyway is only ever 1 after the user confirms the server's
+		// requires_confirmation answer (company blocks automatic sending - D21).
+		function startSync(send_anyway) {
 			statusBox.html("");
 			progressBar
 				.css("width", "0%")
@@ -508,18 +578,23 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
 
 			frappe.call({
 				method: "titan_digitax.titan_digitax.doctype.digitax_sync_job.digitax_sync_job.execute_digitax_sync",
-				args: { direction, sync_type, company },
+				args: { direction, sync_type, company, from_date, to_date, send_anyway },
 			})
 				.then((r) => {
 					const msg = r && r.message ? r.message : {};
 					if (msg.status === "unavailable") {
-						executeBtn.prop("disabled", false);
-						progressMessage.text(__("Ready to sync"));
+						resetToReady();
 						frappe.msgprint({
 							title: __("Coming Soon"),
 							message: msg.message,
 							indicator: "blue",
 						});
+						return;
+					}
+
+					if (msg.status === "requires_confirmation") {
+						resetToReady();
+						frappe.confirm(msg.message, () => startSync(1));
 						return;
 					}
 
@@ -542,6 +617,11 @@ frappe.pages["digitax-sync"].on_page_load = function (wrapper) {
                         </div>`
 					);
 				});
-		});
+		}
+
+		frappe.confirm(
+			__("Are you sure you want to sync {0}{1} {2} Digitax for {3}?", [sync_type, scope, preposition, company]),
+			() => startSync(0)
+		);
 	});
 };
