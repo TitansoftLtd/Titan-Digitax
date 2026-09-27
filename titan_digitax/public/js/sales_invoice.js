@@ -12,7 +12,7 @@ frappe.ui.form.on("Sales Invoice", {
 					return;
 				}
 				add_send_to_digitax_button(frm);
-				add_print_digitax_button(frm);
+				add_print_digitax_button(frm, r.message.print_format);
 				add_virtual_amendment_buttons(frm);
 			},
 		});
@@ -154,13 +154,13 @@ const send_to_digitax = (frm, send_anyway) => {
 	});
 };
 
-const add_print_digitax_button = (frm) => {
+const add_print_digitax_button = (frm, print_format) => {
 	if (!frm.doc.custom_sent_to_digitax && !frm.doc.custom_sale_id) {
 		return;
 	}
 
 	frm.add_custom_button(__("Print Digitax Invoice"), function () {
-		frappe.utils.print(frm.doctype, frm.doc.name, "Sales Invoice(Digitax)");
+		frappe.utils.print(frm.doctype, frm.doc.name, print_format || "Digitax Tax Invoice");
 	}, __("Digitax Actions"));
 };
 

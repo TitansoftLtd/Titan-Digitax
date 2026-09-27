@@ -14,11 +14,13 @@ bench install-app titan_digitax
 
 ### Printing a Digitax invoice (`Print Digitax Invoice`)
 
-**Digitax Actions → Print Digitax Invoice** currently opens the in-app
-**`Sales Invoice(Digitax)`** print format (`frappe.utils.print(...)` in
-`public/js/sales_invoice.js`) — a normal Frappe/wkhtmltopdf print format built from real
-Desk data (Company, Digitax Company Settings, the actual Digitax-sent line items), no
-external service or headless browser involved.
+**Digitax Actions → Print Digitax Invoice** opens the print format named by an installed
+school app's `digitax_invoice_print_format` hook (e.g. `st_austins` declares its own
+`Sales Invoice(Digitax)` fee invoice, with its print/bank details on `Engage Settings`),
+or this app's generic **`Digitax Tax Invoice`** when no school app declares one. Both are
+normal Frappe/wkhtmltopdf print formats built from real Desk data and the actual
+Digitax-sent line items — no external service or headless browser involved. School-specific
+layout and payment details never live in this app.
 
 There was previously a second mechanism, `download_digitax_receipt_pdf`, which rendered
 the live [receipt.dg.tax](https://receipt.dg.tax) page for an invoice's `custom_offline_url`

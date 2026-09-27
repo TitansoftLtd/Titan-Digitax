@@ -1,40 +1,33 @@
 {
  "actions": [],
  "autoname": "field:company",
- "creation": "2026-08-04 12:00:00.000000",
+ "creation": "2026-08-04 12:00:00",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "general_settings_section",
   "company",
   "enabled",
-  "column_break_general",
-  "description",
+  "column_break_tgyj",
+  "block_automatic_invoice_sending",
+  "invoice_status_codes_section",
+  "submitted_invoice_status_code",
+  "default_receipt_type_code",
+  "column_break_status",
+  "cancelled_invoice_status_code",
+  "default_payment_type_code",
+  "tab_2_tab",
   "credentials_section",
   "base_url",
   "api_key",
   "column_break_credentials",
   "api_key_fingerprint",
   "callback_token",
-  "invoice_sending_section",
-  "block_automatic_invoice_sending",
-  "digitax_options_section",
-  "target_country",
-  "api_request_timeout",
-  "max_retry_attempts",
-  "retry_batch_size",
-  "background_job_timeout",
-  "item_sync_overrides_section",
-  "require_digitax_item_name",
-  "require_manual_item_sync",
-  "column_break_d14",
-  "auto_sync_items_to_digitax",
-  "auto_match_items_by_name",
-  "digitax_roles_section",
-  "send_role",
-  "item_sync_role",
-  "virtual_amendment_role",
-  "column_break_digitax_roles",
-  "digitax_sync_user",
+  "item_settings_tab",
+  "school_fees_item_section",
+  "default_item_bar_code",
+  "column_break_school_fees",
+  "default_is_stockable",
   "default_item_settings_section",
   "default_item_class_code",
   "default_item_type_code",
@@ -43,32 +36,27 @@
   "default_origin_nation_code",
   "default_package_unit_code",
   "default_quantity_unit_code",
-  "school_fees_item_section",
-  "default_item_bar_code",
-  "column_break_school_fees",
-  "default_is_stockable",
-  "invoice_status_codes_section",
-  "submitted_invoice_status_code",
-  "default_receipt_type_code",
-  "column_break_status",
-  "cancelled_invoice_status_code",
-  "default_payment_type_code",
-  "print_invoice_section",
-  "print_tagline",
-  "po_box",
-  "column_break_print_1",
-  "print_notes",
-  "term_opening_date",
-  "bank_details_section",
-  "bank_name",
-  "bank_account_name",
-  "bank_account_no",
-  "column_break_print_2",
-  "bank_branch",
-  "bank_branch_code",
-  "bank_swift_code",
-  "mpesa_paybill",
-  "mpesa_paybill_account"
+  "item_sync_overrides_section",
+  "require_digitax_item_name",
+  "require_manual_item_sync",
+  "column_break_d14",
+  "auto_sync_items_to_digitax",
+  "auto_match_items_by_name",
+  "role_settings_tab",
+  "digitax_roles_section",
+  "send_role",
+  "item_sync_role",
+  "column_break_digitax_roles",
+  "virtual_amendment_role",
+  "digitax_sync_user",
+  "other_settings_tab",
+  "digitax_options_section",
+  "target_country",
+  "api_request_timeout",
+  "max_retry_attempts",
+  "column_break_tlcu",
+  "retry_batch_size",
+  "background_job_timeout"
  ],
  "fields": [
   {
@@ -90,22 +78,12 @@
    "label": "Enabled"
   },
   {
-   "fieldname": "column_break_general",
-   "fieldtype": "Column Break"
-  },
-  {
-   "fieldname": "description",
-   "fieldtype": "Small Text",
-   "label": "Description"
-  },
-  {
-   "description": "Each company files under its own KRA account. Every field on this doctype belongs to this company alone — there is no shared/global DigiTax configuration.",
    "fieldname": "credentials_section",
    "fieldtype": "Section Break",
    "label": "DigiTax Credentials"
   },
   {
-   "description": "This company's DigiTax API host, e.g. https://api.digitax.tech/ke/v2",
+   "description": "E.g. https://api.digitax.tech/ke/v2",
    "fieldname": "base_url",
    "fieldtype": "Data",
    "label": "Base URL",
@@ -113,7 +91,6 @@
    "reqd": 1
   },
   {
-   "description": "This company's X-API-Key, sent on every request to DigiTax.",
    "fieldname": "api_key",
    "fieldtype": "Password",
    "label": "API Key",
@@ -138,13 +115,7 @@
    "label": "Callback Token"
   },
   {
-   "fieldname": "invoice_sending_section",
-   "fieldtype": "Section Break",
-   "label": "Invoice Sending"
-  },
-  {
    "default": "0",
-   "description": "When ON, submitted invoices and credit notes are NOT sent to Digitax automatically (neither on submit nor by the hourly retry sweep). They can still be sent manually, after confirming, from the Sales Invoice (Digitax Actions > Send to Digitax) or in bulk from the Digitax Sync page (To DigiTax > Invoices, optionally by date range).",
    "fieldname": "block_automatic_invoice_sending",
    "fieldtype": "Check",
    "label": "Block Automatic Invoice Sending"
@@ -156,56 +127,52 @@
   },
   {
    "default": "Kenya",
-   "description": "Invoices are only sent to DigiTax if this company's country matches this value.",
    "fieldname": "target_country",
    "fieldtype": "Link",
    "label": "Target Country",
-   "options": "Country"
+   "options": "Country",
+   "reqd": 1
   },
   {
    "default": "30",
-   "description": "Timeout for API requests in seconds (default: 30)",
    "fieldname": "api_request_timeout",
    "fieldtype": "Int",
    "label": "API Request Timeout (seconds)"
   },
   {
    "default": "5",
-   "description": "Maximum number of retry attempts for failed invoices (default: 5)",
+   "description": "Default: 5",
    "fieldname": "max_retry_attempts",
    "fieldtype": "Int",
    "label": "Max Retry Attempts"
   },
   {
    "default": "100",
-   "description": "Max unsent invoices for this company retried in a single hourly sweep, oldest first (default: 100). At a typical ~5s per send, 100 invoices takes roughly 8 minutes; worst case (every invoice hitting the full API Request Timeout) it's bounded by that timeout x this number, shared across all companies within Background Job Timeout. A large backlog drains gradually over multiple hourly runs rather than one sweep trying to process everything at once.",
    "fieldname": "retry_batch_size",
    "fieldtype": "Int",
    "label": "Retry Batch Size"
   },
   {
    "default": "600",
-   "description": "Timeout for background retry jobs in seconds (default: 600 = 10 minutes)",
    "fieldname": "background_job_timeout",
    "fieldtype": "Int",
    "label": "Background Job Timeout (seconds)"
   },
   {
-   "description": "Item registration for this company is manual by default: a Digitax Item must be created by a person, and an ERP Item's link to it is set by hand unless Auto Match Items by Name is on. St. Austin defaults: require Digitax Item Name ON, require manual sync ON, both auto settings below OFF.",
    "fieldname": "item_sync_overrides_section",
    "fieldtype": "Section Break",
    "label": "Item Sync Overrides"
   },
   {
    "default": "1",
-   "description": "When ON, every SI line Item must have Digitax Item Name; DigiTax receives that name only (never ERP item name).",
+   "description": "Every Invoice line Item must have Digitax Item Name; DigiTax receives that name only (never ERP item name).",
    "fieldname": "require_digitax_item_name",
    "fieldtype": "Check",
    "label": "Require Digitax Item Name"
   },
   {
    "default": "1",
-   "description": "When ON, DigiTax send blocks unless the Item's linked Digitax Item is already synced (manual Sync to Digitax).",
+   "description": "Blocks sending unless Item is already synced",
    "fieldname": "require_manual_item_sync",
    "fieldtype": "Check",
    "label": "Require Manual Item Sync"
@@ -216,14 +183,12 @@
   },
   {
    "default": "0",
-   "description": "When ON, a Digitax Item record (however it was created) is pushed to DigiTax automatically rather than requiring a manual Sync click. Not for St. Austin default.",
    "fieldname": "auto_sync_items_to_digitax",
    "fieldtype": "Check",
    "label": "Auto Sync Items to Digitax"
   },
   {
    "default": "0",
-   "description": "When ON, ERP Items are auto-linked to a same-company Digitax Item by matching name, instead of requiring a person to set the link by hand. Governs linking only — a Digitax Item must still be created by a person first. Not for St. Austin default.",
    "fieldname": "auto_match_items_by_name",
    "fieldtype": "Check",
    "label": "Auto Match Items by Name"
@@ -234,21 +199,19 @@
    "label": "Digitax Roles & Sync Identity"
   },
   {
-   "description": "Only users with this role can manually send a Sales Invoice to Digitax or view its Digitax/amendment status for this company.",
+   "description": "Role to Send and View Virtual Amendments",
    "fieldname": "send_role",
    "fieldtype": "Link",
    "label": "Send Role",
    "options": "Role"
   },
   {
-   "description": "Only users with this role can manually sync a Digitax Item to this company's Digitax/KRA account.",
    "fieldname": "item_sync_role",
    "fieldtype": "Link",
    "label": "Item Sync Role",
    "options": "Role"
   },
   {
-   "description": "Only users with this role can preview and send Digitax virtual amendments for this company.",
    "fieldname": "virtual_amendment_role",
    "fieldtype": "Link",
    "label": "Virtual Amendment Role",
@@ -260,7 +223,6 @@
   },
   {
    "default": "digitaxsyncuser@example.com",
-   "description": "The account that automatic/background Digitax work (invoice submit, hourly retries, item auto-sync) always runs as, and that manual actions switch to once the initiating user's role above is confirmed - so every Digitax write is consistently attributed to one account rather than whichever user or background job happened to trigger it.",
    "fieldname": "digitax_sync_user",
    "fieldtype": "Link",
    "label": "Digitax Sync User",
@@ -286,7 +248,6 @@
    "label": "Default Item Type Code"
   },
   {
-   "default": "D",
    "description": "Fallback tax type code when not specified on item (default: D)",
    "fieldname": "default_item_tax_type_code",
    "fieldtype": "Select",
@@ -379,90 +340,42 @@
    "label": "Default Payment Type Code"
   },
   {
-   "description": "Used by the Sales Invoice(Digitax) print format. Leave blank to omit a field from the printout entirely.",
-   "fieldname": "print_invoice_section",
-   "fieldtype": "Section Break",
-   "label": "Print / Invoice Details"
-  },
-  {
-   "description": "Shown under the company name on the printed invoice, e.g. a motto or tagline.",
-   "fieldname": "print_tagline",
-   "fieldtype": "Data",
-   "label": "Print Tagline"
-  },
-  {
-   "fieldname": "po_box",
-   "fieldtype": "Data",
-   "label": "P.O. Box"
-  },
-  {
-   "fieldname": "column_break_print_1",
+   "fieldname": "column_break_tlcu",
    "fieldtype": "Column Break"
   },
   {
-   "description": "Free text shown in the NOTES box on the printed invoice.",
-   "fieldname": "print_notes",
-   "fieldtype": "Small Text",
-   "label": "Print Notes"
-  },
-  {
-   "fieldname": "term_opening_date",
-   "fieldtype": "Date",
-   "label": "Official Opening Date"
-  },
-  {
-   "fieldname": "bank_details_section",
+   "fieldname": "general_settings_section",
    "fieldtype": "Section Break",
-   "label": "Bank & Payment Details"
+   "label": "General Settings"
   },
   {
-   "fieldname": "bank_name",
-   "fieldtype": "Data",
-   "label": "Bank Name"
-  },
-  {
-   "fieldname": "bank_account_name",
-   "fieldtype": "Data",
-   "label": "Bank Account Name"
-  },
-  {
-   "fieldname": "bank_account_no",
-   "fieldtype": "Data",
-   "label": "Bank Account Number"
-  },
-  {
-   "fieldname": "column_break_print_2",
+   "fieldname": "column_break_tgyj",
    "fieldtype": "Column Break"
   },
   {
-   "fieldname": "bank_branch",
-   "fieldtype": "Data",
-   "label": "Bank Branch Name"
+   "fieldname": "tab_2_tab",
+   "fieldtype": "Tab Break",
+   "label": "Credentials"
   },
   {
-   "fieldname": "bank_branch_code",
-   "fieldtype": "Data",
-   "label": "Bank Branch Code"
+   "fieldname": "item_settings_tab",
+   "fieldtype": "Tab Break",
+   "label": "Item Settings"
   },
   {
-   "fieldname": "bank_swift_code",
-   "fieldtype": "Data",
-   "label": "Bank Swift Code"
+   "fieldname": "role_settings_tab",
+   "fieldtype": "Tab Break",
+   "label": "Role Settings"
   },
   {
-   "fieldname": "mpesa_paybill",
-   "fieldtype": "Data",
-   "label": "Mpesa Paybill"
-  },
-  {
-   "fieldname": "mpesa_paybill_account",
-   "fieldtype": "Data",
-   "label": "Mpesa Paybill Account"
+   "fieldname": "other_settings_tab",
+   "fieldtype": "Tab Break",
+   "label": "Other Settings"
   }
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-09-24 12:00:00.000000",
+ "modified": "2026-09-27 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Company Settings",
@@ -481,6 +394,7 @@
    "write": 1
   }
  ],
+ "row_format": "Dynamic",
  "sort_field": "modified",
  "sort_order": "DESC",
  "states": [],

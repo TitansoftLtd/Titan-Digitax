@@ -222,4 +222,18 @@ def get_company_digitax_status(company):
     if not company:
         return {"eligible": False}
 
-    return {"eligible": is_digitax_enabled_for_company(company)}
+    return {"eligible": is_digitax_enabled_for_company(company), "print_format": get_invoice_print_format()}
+
+
+GENERIC_INVOICE_PRINT_FORMAT = "Digitax Tax Invoice"
+
+
+def get_invoice_print_format():
+    """The print format the Print Digitax Invoice button uses. A school app names
+    its own via the digitax_invoice_print_format hook (D22) - titan_digitax never
+    names one itself - otherwise the generic Digitax Tax Invoice.
+    """
+    for name in reversed(frappe.get_hooks("digitax_invoice_print_format") or []):
+        if name and frappe.db.exists("Print Format", {"name": name, "disabled": 0}):
+            return name
+    return GENERIC_INVOICE_PRINT_FORMAT
