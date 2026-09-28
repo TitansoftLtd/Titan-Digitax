@@ -1,5 +1,6 @@
 import frappe
 from frappe import _
+from .company_config import is_automatic_invoice_sending_blocked
 from .sales import send_sales_invoice_to_digitax_automatic, validate_credit_note_against_active_amendments
 
 
@@ -9,6 +10,12 @@ def validate(doc, method):
 
 def on_submit(doc, method):
     if not frappe.conf.get("sync_with_digitax"):
+        return
+
+    # D21: the company sends manually only. Don't even enqueue - the automatic
+    # entrypoint re-checks this anyway, in case the block is switched on between
+    # enqueue and the job running.
+    if is_automatic_invoice_sending_blocked(doc.company):
         return
 
     # Sending to Digitax is a synchronous HTTP call (up to api_request_timeout,

@@ -5,7 +5,7 @@ import uuid
 
 import frappe
 from frappe.model.document import Document
-from frappe.utils import now
+from frappe.utils import add_to_date, cint, getdate, now, now_datetime
 
 DIRECTION_TO_DIGITAX = "To DigiTax"
 DIRECTION_FROM_DIGITAX = "From DigiTax"
@@ -19,6 +19,12 @@ SYNC_TYPES_BY_DIRECTION = {
 }
 
 NOT_YET_AVAILABLE_SYNC_TYPES = {"Customers"}
+
+# A manual invoice run works through the whole selected backlog in batches rather
+# than stopping after one - with automatic sending blocked (D21) nothing else will
+# pick up a remainder. Capped short of the job's own 3600s timeout; whatever is
+# left when it runs out is reported, and another Execute picks it up.
+INVOICE_SYNC_MAX_DURATION_MINUTES = 50
 
 
 class DigitaxSyncJob(Document):
@@ -108,6 +114,7 @@ def get_recent_sync_jobs(limit=10, company=None):
 			"name", "job_id", "direction", "sync_type", "company", "status",
 			"percentage_complete", "last_message", "total_records", "processed_records",
 			"skipped_records", "errors", "started_at", "ended_at", "owner", "creation",
+			"from_date", "to_date", "sent_despite_block",
 		],
 		order_by="creation desc",
 		limit=int(limit),
@@ -119,7 +126,7 @@ def get_recent_sync_jobs(limit=10, company=None):
 
 
 @frappe.whitelist()
-def execute_digitax_sync(direction=None, sync_type=None, company=None):
+def execute_digitax_sync(direction=None, sync_type=None, company=None, from_date=None, to_date=None, send_anyway=0):
 	"""
 	Entry point for UI-triggered sync.
 	Creates a new job row and enqueues the background task; the caller polls the
@@ -130,6 +137,10 @@ def execute_digitax_sync(direction=None, sync_type=None, company=None):
 		sync_type: The type of sync to execute — valid options depend on direction,
 			see SYNC_TYPES_BY_DIRECTION
 		company: The company whose Digitax Company Settings to sync with
+		from_date / to_date: Invoices only - optional posting-date bounds (inclusive)
+		send_anyway: Invoices only - the user confirmed sending although this company
+			blocks automatic sending (D21). Without it, a blocked company gets
+			{"status": "requires_confirmation"} back and nothing is queued.
 	"""
 	# Bulk action (an hour-long job, per company or across the catalogue) with no
 	# other caller than this page's own "Execute" button - System Manager only,
@@ -163,11 +174,34 @@ def execute_digitax_sync(direction=None, sync_type=None, company=None):
 			"message": f"{sync_type} sync is not available yet. Coming soon.",
 		}
 
+	sent_despite_block = False
+	if sync_type == "Invoices":
+		from_date = from_date or None
+		to_date = to_date or None
+		if from_date and to_date and getdate(from_date) > getdate(to_date):
+			frappe.throw("From Date cannot be after To Date.")
+
+		from titan_digitax.titan_digitax.utils.company_config import is_automatic_invoice_sending_blocked
+
+		if is_automatic_invoice_sending_blocked(company):
+			if not cint(send_anyway):
+				return {
+					"status": "requires_confirmation",
+					"message": (
+						f"Automatic sending to Digitax is blocked for <b>{frappe.utils.escape_html(company)}</b>. "
+						f"Do you want to send these invoices anyway?"
+					),
+				}
+			sent_despite_block = True
+	else:
+		from_date = to_date = None
+
 	job_id = str(uuid.uuid4())
 	_update_job_record(
 		job_id=job_id, direction=direction, sync_type=sync_type, company=company,
 		status="Queued", started_at=now(), total_records=0, processed_records=0,
 		skipped_records=0, errors=0, percentage_complete=0,
+		from_date=from_date, to_date=to_date, sent_despite_block=1 if sent_despite_block else None,
 		last_message="Job queued, starting soon...",
 	)
 
@@ -180,6 +214,9 @@ def execute_digitax_sync(direction=None, sync_type=None, company=None):
 		direction=direction,
 		sync_type=sync_type,
 		company=company,
+		from_date=from_date,
+		to_date=to_date,
+		send_anyway=sent_despite_block,
 	)
 
 	return {
@@ -189,13 +226,19 @@ def execute_digitax_sync(direction=None, sync_type=None, company=None):
 	}
 
 
-def run_digitax_sync_background(sync_job_id, direction, sync_type, company):
-	"""Background worker for UI-triggered sync — updates the job row throughout."""
+def run_digitax_sync_background(sync_job_id, direction, sync_type, company, from_date=None, to_date=None, send_anyway=False):
+	"""Background worker for UI-triggered sync — updates the job row throughout.
+
+	send_anyway is only ever True when execute_digitax_sync got the user's explicit
+	confirmation for a company that blocks automatic invoice sending (D21).
+	"""
 	job_id = sync_job_id
 	try:
 		_update_job_record(job_id=job_id, status="Running", percentage_complete=0, last_message="Job started")
 
-		result = run_digitax_sync(sync_type, company, job_id=job_id)
+		result = run_digitax_sync(
+			sync_type, company, job_id=job_id, from_date=from_date, to_date=to_date, send_anyway=send_anyway
+		)
 
 		summary = result.get("summary", "Sync completed successfully.")
 		_update_job_record(
@@ -214,7 +257,9 @@ def run_digitax_sync_background(sync_job_id, direction, sync_type, company):
 		frappe.log_error(title=f"Digitax Sync Failed - {sync_type}", message=error_trace)
 
 
-def run_digitax_sync(sync_type, company, start_time=None, end_time=None, job_id=None):
+def run_digitax_sync(
+	sync_type, company, start_time=None, end_time=None, job_id=None, from_date=None, to_date=None, send_anyway=False
+):
 	"""
 	Core sync function that can be called by UI or scheduler.
 
@@ -224,6 +269,8 @@ def run_digitax_sync(sync_type, company, start_time=None, end_time=None, job_id=
 		start_time: Optional datetime for filtering (used by scheduler)
 		end_time: Optional datetime for filtering (used by scheduler)
 		job_id: Optional Digitax Sync Job name to report progress against
+		from_date / to_date: Invoices only - optional posting-date bounds
+		send_anyway: Invoices only - override the company's automatic-send block (D21)
 
 	Returns:
 		dict with summary of sync results
@@ -231,7 +278,9 @@ def run_digitax_sync(sync_type, company, start_time=None, end_time=None, job_id=
 	frappe.logger().info(f"Starting Digitax sync for type: {sync_type}, company: {company}")
 
 	if sync_type == "Invoices":
-		return sync_invoices_to_digitax(company, job_id=job_id)
+		return sync_invoices_to_digitax(
+			company, job_id=job_id, from_date=from_date, to_date=to_date, send_anyway=send_anyway
+		)
 	elif sync_type == "Customers":
 		return sync_customers_from_digitax(company, start_time, end_time)
 	elif sync_type == "Items":
@@ -240,16 +289,21 @@ def run_digitax_sync(sync_type, company, start_time=None, end_time=None, job_id=
 		frappe.throw(f"Unknown sync type: {sync_type}")
 
 
-def sync_invoices_to_digitax(company, job_id=None):
+def sync_invoices_to_digitax(company, job_id=None, from_date=None, to_date=None, send_anyway=False):
 	"""
-	Push this company's not-yet-sent Sales Invoices to DigiTax, ticking per-invoice
+	Push this company's not-yet-sent Sales Invoices (and credit notes) to DigiTax,
+	optionally only those posted between from_date and to_date, ticking per-invoice
 	progress on job_id if given (manual, on-demand — the hourly retry cron at
-	titan_digitax.utils.sales.job_retry_sending_sales_invoices is unaffected and keeps
+	titan_digitax.utils.sales.job_retry_sending_sales_invoices is separate and keeps
 	running its own, job-row-less path).
 
 	Args:
 		company: The company whose unsent invoices to (re)send
 		job_id: Optional Digitax Sync Job name to report progress against
+		from_date / to_date: Optional posting-date bounds (inclusive)
+		send_anyway: The user confirmed sending although this company blocks
+			automatic sending (D21). Without it, a blocked company's invoices are
+			skipped - including if the block is switched on mid-run.
 
 	Returns:
 		dict: Summary with attempted/sent/still_unsent counts
@@ -270,19 +324,18 @@ def sync_invoices_to_digitax(company, job_id=None):
 		summary = f"{company} is not in the Digitax target country ({target_country})"
 		return {"summary": summary, "created": 0, "updated": 0, "skipped": 0, "errors": [summary]}
 
-	try:
-		retry_count = int(settings.get("max_retry_attempts") or 5)
-		if retry_count <= 0:
-			retry_count = 5
-	except (ValueError, TypeError):
-		retry_count = 5
+	# Never the whitelisted per-invoice wrapper - this runs inside a background job
+	# already gated at execute_digitax_sync (System Manager click to start it), and
+	# requiring whoever clicked Execute to separately hold send_role too would add
+	# nothing. The automatic entrypoint still honours the D21 block; the confirmed
+	# one is used only when the user explicitly chose to send anyway.
+	from titan_digitax.titan_digitax.utils.sales import (
+		DEFAULT_RETRY_BATCH_SIZE,
+		send_sales_invoice_to_digitax_automatic,
+		send_sales_invoice_to_digitax_confirmed,
+	)
 
-	# The automatic (unchecked) entrypoint - this runs inside a background job
-	# already gated at execute_digitax_sync (System Manager click to start it),
-	# not a per-invoice interactive send. Using the checked wrapper here would
-	# additionally require whoever clicked Execute to separately hold send_role
-	# too, even though they already passed a stricter gate to get here.
-	from titan_digitax.titan_digitax.utils.sales import DEFAULT_RETRY_BATCH_SIZE, send_sales_invoice_to_digitax_automatic
+	send = send_sales_invoice_to_digitax_confirmed if send_anyway else send_sales_invoice_to_digitax_automatic
 
 	try:
 		batch_size = int(settings.get("retry_batch_size") or DEFAULT_RETRY_BATCH_SIZE)
@@ -291,80 +344,102 @@ def sync_invoices_to_digitax(company, job_id=None):
 	except (ValueError, TypeError):
 		batch_size = DEFAULT_RETRY_BATCH_SIZE
 
+	# No custom_retry_count < max_retry_attempts filter here, unlike the hourly
+	# sweep: that budget exists to stop the automatic sweep retrying a broken
+	# invoice every hour. A user-started run tries each invoice once, and a user
+	# who picks a date range expects every unsent invoice in it to be tried - the
+	# same as the per-invoice Send to Digitax button, which never checked it either.
 	invoice_filters = {
 		"docstatus": 1,
 		"custom_sent_to_digitax": 0,
 		"company": company,
-		"custom_retry_count": ["<", retry_count],
 	}
+	if from_date and to_date:
+		invoice_filters["posting_date"] = ["between", [from_date, to_date]]
+	elif from_date:
+		invoice_filters["posting_date"] = [">=", from_date]
+	elif to_date:
+		invoice_filters["posting_date"] = ["<=", to_date]
 
-	# Same reasoning as the hourly retry sweep (F8): an unbounded fetch here risks
-	# one Execute click trying to process an entire backlog in a single job run,
-	# with no resumability if it's interrupted. Reuses the same per-company
-	# retry_batch_size setting rather than inventing a second one - oldest first,
-	# same as the sweep, so which invoices get through first is predictable.
+	date_scope = ""
+	if from_date or to_date:
+		date_scope = f" posted {from_date or 'any date'} to {to_date or 'any date'}"
+
 	backlog_total = frappe.db.count("Sales Invoice", invoice_filters)
-	invoices = frappe.get_all(
-		"Sales Invoice",
-		filters=invoice_filters,
-		pluck="name",
-		order_by="posting_date asc",
-		limit_page_length=batch_size,
-	)
-
-	total = len(invoices)
-	if backlog_total > total:
-		# No silent truncation - if the backlog is bigger than one batch, say so
-		# up front rather than quietly under-reporting "Attempted" against the
-		# true total. The rest stays picked up by the hourly retry sweep, or the
-		# next manual Execute.
-		found_message = f"Found {total} of {backlog_total} unsent invoice(s) for {company} (batch capped at {batch_size})"
-	else:
-		found_message = f"Found {total} unsent invoice(s) for {company}"
-
 	_update_job_record(
-		job_id=job_id, total_records=total, percentage_complete=20,
-		last_message=found_message,
+		job_id=job_id, total_records=backlog_total, percentage_complete=20,
+		last_message=f"Found {backlog_total} unsent invoice(s) for {company}{date_scope}",
 	)
 
+	# Bounded fetches (F26): one batch at a time, oldest first, originals before
+	# credit notes on the same date so a same-day return finds its sale already
+	# filed. Anything attempted this run is excluded from later batches, so a
+	# failing invoice is tried once per run, not repeatedly.
+	deadline = add_to_date(now_datetime(), minutes=INVOICE_SYNC_MAX_DURATION_MINUTES)
+	attempted = []
 	errors = []
-	for idx, invoice in enumerate(invoices, 1):
-		try:
-			send_sales_invoice_to_digitax_automatic(invoice)
-		except Exception as e:
-			errors.append(f"{invoice}: {e}")
+	out_of_time = False
 
-		if _should_flush_progress(idx, total):
-			percentage = 20 + int((idx / total) * 70) if total else 90
-			_update_job_record(
-				job_id=job_id, processed_records=idx, errors=len(errors),
-				percentage_complete=percentage, last_message=f"Processed {idx}/{total}: {invoice}",
-			)
+	while True:
+		filters = dict(invoice_filters)
+		if attempted:
+			filters["name"] = ["not in", attempted]
+		batch = frappe.get_all(
+			"Sales Invoice",
+			filters=filters,
+			pluck="name",
+			order_by="posting_date asc, is_return asc, name asc",
+			limit_page_length=batch_size,
+		)
+		if not batch:
+			break
 
-	# The IN-list here is naturally bounded now too, since invoices is capped at
-	# batch_size rather than the whole backlog.
-	still_unsent_in_batch = (
+		for invoice in batch:
+			try:
+				send(invoice)
+			except Exception as e:
+				errors.append(f"{invoice}: {e}")
+			attempted.append(invoice)
+
+			# New invoices can land in range mid-run, so never report past 100%.
+			total = max(backlog_total, len(attempted))
+			if _should_flush_progress(len(attempted), total):
+				_update_job_record(
+					job_id=job_id, total_records=total, processed_records=len(attempted),
+					errors=len(errors), percentage_complete=20 + int((len(attempted) / total) * 70),
+					last_message=f"Processed {len(attempted)}/{total}: {invoice}",
+				)
+
+		if now_datetime() >= deadline:
+			out_of_time = True
+			break
+
+	still_unsent_attempted = (
 		frappe.db.count(
 			"Sales Invoice",
-			{"docstatus": 1, "custom_sent_to_digitax": 0, "company": company, "name": ["in", invoices]},
+			{"docstatus": 1, "custom_sent_to_digitax": 0, "company": company, "name": ["in", attempted]},
 		)
-		if invoices
+		if attempted
 		else 0
 	)
-	sent = max(total - still_unsent_in_batch, 0)
-	not_attempted = max(backlog_total - total, 0)
-	still_unsent_overall = still_unsent_in_batch + not_attempted
+	sent = len(attempted) - still_unsent_attempted
+	not_attempted = frappe.db.count(
+		"Sales Invoice", {**invoice_filters, "name": ["not in", attempted]} if attempted else invoice_filters
+	)
 
-	summary = f"Invoices synced to Digitax: Attempted={total}, Sent={sent}, Still Unsent={still_unsent_overall}"
-	if not_attempted:
-		summary += f" ({not_attempted} not attempted this run - batch capped at {batch_size})"
+	summary = (
+		f"Invoices synced to Digitax{date_scope}: Attempted={len(attempted)}, Sent={sent}, "
+		f"Still Unsent={still_unsent_attempted + not_attempted}"
+	)
+	if out_of_time and not_attempted:
+		summary += f" ({not_attempted} not attempted - time limit reached, run again to continue)"
 	frappe.logger().info(summary)
 
 	return {
 		"summary": summary,
 		"created": sent,
 		"updated": 0,
-		"skipped": still_unsent_overall,
+		"skipped": still_unsent_attempted + not_attempted,
 		"errors": errors,
 	}
 

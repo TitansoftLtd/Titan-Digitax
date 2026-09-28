@@ -56,10 +56,11 @@ def get_digitax_tax_breakdown(items):
 	totals = {code: 0.0 for code in ("A", "B", "C", "D", "E")}
 
 	for entry in items:
-		code = (entry.get("tax_type_code") or "D").upper()
-		if code not in totals:
-			code = "D"
-		totals[code] += abs(float(entry.get("total_amount") or 0))
+		# An item whose tax class can't be determined is left out of the breakdown
+		# rather than guessed into a class (D23 - no built-in codes).
+		code = (entry.get("tax_type_code") or "").upper()
+		if code in totals:
+			totals[code] += abs(float(entry.get("total_amount") or 0))
 
 	rows = []
 	for code in ("A", "B", "C", "D", "E"):
@@ -87,7 +88,7 @@ def get_digitax_print_items(doc, digitax_settings=None):
 	dry_run=True: this is a read-only print action, never write/commit/raise an
 	Actionable Item just because someone opened Print. If gates fail (e.g. missing
 	item links), falls back to the raw invoice lines so the printout isn't empty,
-	same pattern as get_sales_invoice_digitax_print_context.
+	same pattern as the school app's own invoice print context.
 	"""
 	if digitax_settings is None:
 		from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
@@ -100,6 +101,20 @@ def get_digitax_print_items(doc, digitax_settings=None):
 	logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
 	built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True)
 
+	def tax_type_for(digitax_id=None, item_code=None):
+		# Credit-note lines don't carry item_tax_type_code, and fallback lines are raw
+		# invoice rows - read the real class from the Digitax Item, else the company's
+		# optional default, else leave it unknown.
+		code = None
+		if digitax_id:
+			code = frappe.db.get_value("Digitax Item", {"digitax_id": digitax_id, "company": doc.company}, "tax_type_code")
+		elif item_code:
+			from titan_digitax.titan_digitax.utils.digitax_item_sync import get_digitax_item_for_invoice_item
+
+			linked = get_digitax_item_for_invoice_item(item_code, doc.company)
+			code = frappe.db.get_value("Digitax Item", linked, "tax_type_code") if linked else None
+		return code or digitax_settings.get("default_item_tax_type_code") or None
+
 	if built.get("ok"):
 		raw_items = built["items"]
 		return [
@@ -108,9 +123,7 @@ def get_digitax_print_items(doc, digitax_settings=None):
 				"quantity": entry.get("quantity") or 1,
 				"unit_price": entry.get("unit_price") or 0,
 				"total_amount": entry.get("total_amount") or 0,
-				# Only set for sales, never for credit notes - no per-item tax type
-				# exists to prorate against on the return side either way.
-				"tax_type_code": entry.get("item_tax_type_code") or "D",
+				"tax_type_code": entry.get("item_tax_type_code") or tax_type_for(digitax_id=entry.get("id")),
 				"currency": currency,
 				"formatted_unit_price": fmt_money(entry.get("unit_price") or 0, currency=currency),
 				"formatted_total_amount": fmt_money(entry.get("total_amount") or 0, currency=currency),
@@ -120,15 +133,14 @@ def get_digitax_print_items(doc, digitax_settings=None):
 
 	# Nothing valid was built for Digitax (e.g. item master data drifted since the
 	# original send) — fall back to the raw invoice lines so the printout isn't
-	# empty. No real tax_type_code available here, defaults to "D" in the tax
-	# breakdown below like any other fallback item.
+	# empty, with each row's tax class resolved the same way as above.
 	return [
 		{
 			"item_name": row.item_name or row.description or row.item_code,
 			"quantity": abs(row.qty or 1),
 			"unit_price": abs(row.rate or 0),
 			"total_amount": abs(row.amount or 0),
-			"tax_type_code": "D",
+			"tax_type_code": tax_type_for(item_code=row.item_code),
 			"currency": currency,
 			"formatted_unit_price": fmt_money(abs(row.rate or 0), currency=currency),
 			"formatted_total_amount": fmt_money(abs(row.amount or 0), currency=currency),
@@ -211,7 +223,10 @@ def _get_company_logo_url(company_name):
 	return get_url(logo)
 
 
-def _get_company_details(company_name):
+def get_company_print_details(company_name):
+	"""Company header for any printed invoice - name, address, phone, email, PIN,
+	logo. Public: school apps' own print formats reuse it (D22).
+	"""
 	company = frappe.get_cached_doc("Company", company_name)
 	address = ""
 
@@ -243,8 +258,8 @@ def get_digitax_print_context(doc):
 	Shows the real item(s) build_digitax_items_payload produces - the same
 	aggregation actually POSTed to Digitax - instead of a single synthetic
 	whole-invoice line, so what's printed always matches what was sent. This
-	format prints what was actually filed, so (like Sales Invoice(Digitax))
-	it requires custom_sent_to_digitax first.
+	format prints what was actually filed, so (like the school apps' own
+	invoice formats) it requires custom_sent_to_digitax first.
 	"""
 	if isinstance(doc, str):
 		doc = frappe.get_doc("Sales Invoice", doc)
@@ -282,7 +297,7 @@ def get_digitax_print_context(doc):
 		"document_title": document_title,
 		"status_text": status_text,
 		"digitax": digitax_details or {},
-		"company": _get_company_details(doc.company),
+		"company": get_company_print_details(doc.company),
 		"customer": {
 			"name": doc.customer_name or doc.customer or "",
 			"pin": customer_pin.get("pin") or "",
@@ -299,107 +314,4 @@ def get_digitax_print_context(doc):
 		"scu_invoice_no": scu_invoice_no,
 		"invoice_name": doc.name,
 		"posting_date": doc.posting_date,
-	}
-
-
-def get_sales_invoice_digitax_print_context(doc):
-	"""Build the print context used by the Sales Invoice(Digitax) print format.
-
-	The Fees table shows the actual item(s) built by build_digitax_items_payload —
-	the same aggregation that is literally POSTed to DigiTax — not the raw Sales
-	Invoice lines, so what's printed always matches what was sent.
-
-	This format prints what was actually filed, so it only makes sense once the
-	invoice has actually been sent - printing before that would either be blank
-	or misleadingly show what a hypothetical future send might look like.
-	"""
-	if isinstance(doc, str):
-		doc = frappe.get_doc("Sales Invoice", doc)
-
-	if not doc.custom_sent_to_digitax:
-		frappe.throw(_("This invoice has not been sent to Digitax yet."))
-
-	from titan_digitax.titan_digitax.utils.company_config import get_digitax_settings
-	from titan_digitax.titan_digitax.utils.sales_items import build_digitax_items_payload
-
-	digitax_settings = get_digitax_settings(doc.company)
-	currency = doc.currency or frappe.db.get_value("Company", doc.company, "default_currency")
-
-	logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
-	# dry_run=True: this is a read-only print action. If gates fail here despite
-	# custom_sent_to_digitax already being set (item master data changed since the
-	# original send), fall back to the raw invoice lines below rather than writing
-	# an error/Actionable Item just because someone opened Print.
-	built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True)
-
-	if built.get("ok"):
-		raw_items = built["items"]
-		items = [
-			{
-				"description": entry.get("item_name") or entry.get("item_description") or "Item",
-				"amount": entry.get("total_amount") or 0,
-				"formatted_amount": fmt_money(entry.get("total_amount") or 0, currency=currency),
-			}
-			for entry in raw_items
-		]
-		invoice_total = sum(entry.get("total_amount") or 0 for entry in raw_items)
-	else:
-		# Nothing valid was built for Digitax (e.g. missing item links) — fall back to
-		# the raw invoice lines so the printout isn't empty.
-		items = [
-			{
-				"description": row.item_name or row.description or row.item_code,
-				"amount": abs(row.amount or 0),
-				"formatted_amount": fmt_money(abs(row.amount or 0), currency=currency),
-			}
-			for row in doc.items
-		]
-		invoice_total = abs(doc.grand_total or 0)
-
-	company = _get_company_details(doc.company)
-	company["tagline"] = digitax_settings.get("print_tagline") or ""
-	company["po_box"] = digitax_settings.get("po_box") or ""
-
-	# customer_code is an st_austins-owned custom field (Engage's own account code
-	# for this customer) - titan_digitax ships no such field itself, so on a
-	# generic install without st_austins the column doesn't exist in the database
-	# at all. Reading it unconditionally raises OperationalError: Unknown column,
-	# crashing the print button outright. The template already hides this row
-	# entirely when blank ({% if ctx.customer.account_code %}), so falling back
-	# to "" here is a complete fix, not a partial one.
-	customer_code = (
-		frappe.db.get_value("Customer", doc.customer, "customer_code")
-		if frappe.get_meta("Customer").has_field("customer_code")
-		else None
-	) or ""
-	reference_no = getattr(doc, "custom_engage_invoice_number", None) or doc.name
-	digitax_details = get_active_digitax_details(doc)
-
-	return {
-		"document_title": "Credit Note" if doc.is_return else "Invoice",
-		"offline_url": (digitax_details or {}).get("offline_url") or "",
-		"company": company,
-		"reference_no": reference_no,
-		"posting_date": doc.posting_date,
-		"due_date": doc.due_date,
-		"customer": {
-			"name": doc.customer_name or doc.customer or "",
-			"account_code": customer_code,
-		},
-		"line_items": items,
-		"currency": currency,
-		"formatted_invoice_total": fmt_money(invoice_total, currency=currency),
-		"formatted_total_due": fmt_money(abs(doc.outstanding_amount or 0), currency=currency),
-		"payment": {
-			"bank_name": digitax_settings.get("bank_name") or "",
-			"bank_account_name": digitax_settings.get("bank_account_name") or "",
-			"bank_account_no": digitax_settings.get("bank_account_no") or "",
-			"bank_branch": digitax_settings.get("bank_branch") or "",
-			"bank_branch_code": digitax_settings.get("bank_branch_code") or "",
-			"bank_swift_code": digitax_settings.get("bank_swift_code") or "",
-			"mpesa_paybill": digitax_settings.get("mpesa_paybill") or "",
-			"mpesa_paybill_account": digitax_settings.get("mpesa_paybill_account") or "",
-		},
-		"notes": digitax_settings.get("print_notes") or "",
-		"term_opening_date": digitax_settings.get("term_opening_date") or "",
 	}

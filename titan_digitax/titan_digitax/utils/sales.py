@@ -3,9 +3,10 @@ import json
 import requests
 from datetime import datetime, timezone
 from frappe import _
-from frappe.utils import now_datetime, add_to_date
+from frappe.utils import add_to_date, cint, now_datetime
 from .utils import get_digitax_credentials, get_digitax_callback_url_for_sales_with_items
 from .company_config import (
+    is_automatic_invoice_sending_blocked,
     is_digitax_enabled_for_company,
     get_enabled_digitax_companies,
     get_digitax_settings,
@@ -225,18 +226,42 @@ def _write_digitax_response_fields(doc_name, field_mapping, logger, item_title, 
     return failed
 
 
+AUTOMATIC_SENDING_BLOCKED_REASON = "Automatic sending to Digitax is blocked for this company"
+
+
 @frappe.whitelist()
-def send_sales_invoice_to_digitax(docname):
+def send_sales_invoice_to_digitax(docname, send_anyway=0):
     """Interactive entrypoint (e.g. the "Send to Digitax" button). The initiating
     user must hold this company's configured send_role; once confirmed, the
     actual send always runs as the company's Digitax Sync User (see
     company_config.run_as_digitax_sync_user) so every Digitax write is
     consistently attributed to that one account.
+
+    D21: when the company blocks automatic sending, the first call only answers
+    requires_confirmation - the user has to confirm and call again with
+    send_anyway=1. This (and a Digitax Sync invoice run) is the only place the
+    block can be overridden; no background path ever passes send_anyway.
     """
     company = frappe.db.get_value("Sales Invoice", docname, "company")
     if not company:
         frappe.throw(_("Sales Invoice {0} not found.").format(docname))
     require_digitax_role(company, "send_role", "send an invoice to Digitax")
+
+    if is_automatic_invoice_sending_blocked(company):
+        if not cint(send_anyway):
+            return {
+                "requires_confirmation": True,
+                "company": company,
+                "message": _(
+                    "Automatic sending to Digitax is blocked for {0}. Do you want to send {1} anyway?"
+                ).format(frappe.bold(company), frappe.bold(docname)),
+            }
+        # Recorded as the human who confirmed, before switching to the sync user.
+        frappe.get_doc("Sales Invoice", docname).add_comment(
+            "Comment",
+            _("Sent to Digitax manually - confirmed despite automatic sending being blocked for {0}.").format(company),
+        )
+
     return run_as_digitax_sync_user(company, lambda: _send_sales_invoice_to_digitax_impl(docname))
 
 
@@ -247,6 +272,22 @@ def send_sales_invoice_to_digitax_automatic(docname):
     an arbitrary user action, so there's no human to hold a role - but the work
     still always runs as the company's Digitax Sync User, same as the manual
     path, for a consistent actor across every Digitax write.
+
+    Always honours the company's automatic-send block (D21) - there is no way to
+    override it from here.
+    """
+    company = frappe.db.get_value("Sales Invoice", docname, "company")
+    if is_automatic_invoice_sending_blocked(company):
+        return {"skipped": True, "reason": AUTOMATIC_SENDING_BLOCKED_REASON}
+    return run_as_digitax_sync_user(company, lambda: _send_sales_invoice_to_digitax_impl(docname))
+
+
+def send_sales_invoice_to_digitax_confirmed(docname):
+    """Send regardless of the company's automatic-send block (D21). Deliberately
+    not whitelisted: its only caller is a Digitax Sync invoice run that a System
+    Manager started AND explicitly confirmed "send anyway" for (see
+    digitax_sync_job.execute_digitax_sync). Never call this from a scheduler or
+    doc-event path.
     """
     company = frappe.db.get_value("Sales Invoice", docname, "company")
     return run_as_digitax_sync_user(company, lambda: _send_sales_invoice_to_digitax_impl(docname))
@@ -317,8 +358,8 @@ def _send_sales_invoice_to_digitax_impl(docname):
 
     endpoint = ""
     # Get invoice status codes from settings
-    submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
-    cancelled_status = digitax_settings.get("cancelled_invoice_status_code") or "04"
+    submitted_status = digitax_settings.get("submitted_invoice_status_code")
+    cancelled_status = digitax_settings.get("cancelled_invoice_status_code")
     
     # Persist the trader invoice number BEFORE sending. DigiTax echoes this value back
     # on the async callback, which resolves the invoice by
@@ -352,7 +393,7 @@ def _send_sales_invoice_to_digitax_impl(docname):
     if not doc.is_return:
         endpoint = "sales-with-items"
         payload["sale_date"] = str(doc.posting_date)
-        payload["receipt_type_code"] = digitax_settings.get("default_receipt_type_code") or "S"
+        payload["receipt_type_code"] = digitax_settings.get("default_receipt_type_code")
         payload["payment_type_code"] = digitax_settings.get("default_payment_type_code") or "01"
         logger.info(f"Invoice Type: Regular Sales Invoice")
     else:
@@ -579,6 +620,12 @@ def retry_sending_sales_invoice_to_digitax(invoice_name=None, company=None, from
 
             for comp in companies:
                 if not is_digitax_enabled_for_company(comp):
+                    continue
+
+                # D21: this sweep is an automatic path - a company that sends
+                # manually only is skipped outright rather than fetched and
+                # then skipped invoice by invoice.
+                if is_automatic_invoice_sending_blocked(comp):
                     continue
 
                 settings = get_digitax_settings(comp)
@@ -1509,7 +1556,7 @@ def _build_virtual_reversal_payload(doc, digitax_settings, state, logger):
     if not built.get("ok"):
         return built
 
-    submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
+    submitted_status = digitax_settings.get("submitted_invoice_status_code")
     payload = {
         "trader_invoice_number": state["next_reversal_trader_invoice_number"],
         "items": built["items"],
@@ -1536,14 +1583,14 @@ def _build_virtual_sale_payload(doc, digitax_settings, state, logger):
     if not built.get("ok"):
         return built
 
-    submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
+    submitted_status = digitax_settings.get("submitted_invoice_status_code")
     payload = {
         "trader_invoice_number": state["next_sale_trader_invoice_number"],
         "items": built["items"],
         "invoice_status_code": submitted_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "sale_date": _get_digitax_correction_date(),
-        "receipt_type_code": digitax_settings.get("default_receipt_type_code") or "S",
+        "receipt_type_code": digitax_settings.get("default_receipt_type_code"),
         "payment_type_code": digitax_settings.get("default_payment_type_code") or "01",
     }
 

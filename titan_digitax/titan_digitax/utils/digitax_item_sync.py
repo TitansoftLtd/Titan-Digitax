@@ -113,8 +113,8 @@ def sync_digitax_item(digitax_item_name):
 
 
 def sync_digitax_item_automatic(digitax_item_name):
-	"""Automatic/background entrypoint - st_austins's auto-sync-on-item-create
-	(gated by that company's own auto_sync_items_to_digitax toggle) calls this
+	"""Automatic/background entrypoint for companion apps that register Digitax
+	Items on their own (e.g. a school app's sync, under its own settings) - called
 	directly, never the whitelisted wrapper above. Not an arbitrary user action,
 	so no role is checked, but the sync still always runs as the company's
 	Digitax Sync User, same as the manual path.

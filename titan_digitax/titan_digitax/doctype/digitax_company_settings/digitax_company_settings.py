@@ -6,9 +6,19 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils.password import get_decrypted_password
 
+# Codes fixed by DigiTax's own code lists - read-only on the form, and re-applied
+# from the field defaults on every save so an API call or import can't change them
+# either. The JSON field defaults are the single source of the values.
+FIXED_CODE_FIELDS = (
+	"submitted_invoice_status_code",
+	"cancelled_invoice_status_code",
+	"default_receipt_type_code",
+)
+
 
 class DigitaxCompanySettings(Document):
 	def validate(self):
+		self._apply_fixed_codes()
 		self._validate_company_country()
 		self._set_api_key_fingerprint()
 		self._ensure_callback_token()
@@ -33,6 +43,10 @@ class DigitaxCompanySettings(Document):
 
 		clear_callback_token_index_cache()
 		clear_enabled_companies_cache()
+
+	def _apply_fixed_codes(self):
+		for fieldname in FIXED_CODE_FIELDS:
+			self.set(fieldname, self.meta.get_field(fieldname).default)
 
 	def _validate_company_country(self):
 		"""A company can only file to DigiTax if it's in its own configured target country."""
