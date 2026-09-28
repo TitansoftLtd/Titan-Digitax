@@ -349,7 +349,7 @@ come from the **Company** form: name, address, phone, email, Tax ID and logo.
 | **Digitax Sync page** | Manual sync runs and their live progress |
 | **Error Log** (Desk) | Unexpected errors, titled "Digitax …" |
 | `logs/digitax_integration.log` (bench) | A detailed log of every request and response |
-| **Actionable Items** | Alerts that need a person: retries used up, sync code mismatches, stuck corrections, unrecognised DigiTax responses. **This app has no Actionable Items list of its own.** A companion app has to provide one (see section 11). Without one, these alerts only go to `digitax_integration.log`. |
+| **Actionable Items** (sidebar) | Alerts that need a person: invoices that can't be sent, retries used up, catalogue mismatches, stuck corrections, unrecognised DigiTax responses, a stuck hourly job. Each alert links to the record concerned, and has a priority, an assignee and a status (Open → In Progress → Resolved/Closed). A repeat of the same problem updates the open alert rather than adding another. Companion apps can post their own alerts here too. |
 
 **Scheduled jobs** (need the Frappe scheduler running):
 
@@ -400,9 +400,12 @@ Companion apps plug in through `hooks.py`. This app never names or imports them.
 
 | Hook | Purpose |
 |---|---|
-| `digitax_actionable_item_handler` | Dotted path to a function `create_actionable_item(**kwargs)` that records alerts (title, item_type, description, action_required, reference_doctype, reference_name, priority, company…). Without it, alerts are only logged. |
 | `digitax_discount_redistribution_handler` | Dotted path to `redistribute_discount(...)`, for businesses that put discounts on invoices as negative-amount lines. It spreads the discount across the real items. Without it, such invoices are blocked with an alert rather than guessed at. |
 | `digitax_invoice_print_format` | Name of a Sales Invoice print format that **Print Digitax Invoice** should use instead of `Digitax Tax Invoice`. |
+
+To post your own alerts to **Actionable Items**, call
+`titan_digitax.titan_digitax.doctype.actionable_items.actionable_items.create_actionable_item(title=..., item_type=..., description=..., action_required=..., reference_doctype=..., reference_name=..., priority=..., company=...)`.
+It's server-side only, not callable over the API.
 
 Reusable helpers for your own print formats are in `titan_digitax.titan_digitax.utils.print_format`:
 `get_active_digitax_details(doc)` (sale ID, serial, receipt URL), `get_company_print_details(company)`,
