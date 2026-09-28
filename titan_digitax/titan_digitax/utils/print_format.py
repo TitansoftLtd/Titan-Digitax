@@ -56,10 +56,11 @@ def get_digitax_tax_breakdown(items):
 	totals = {code: 0.0 for code in ("A", "B", "C", "D", "E")}
 
 	for entry in items:
-		code = (entry.get("tax_type_code") or "D").upper()
-		if code not in totals:
-			code = "D"
-		totals[code] += abs(float(entry.get("total_amount") or 0))
+		# An item whose tax class can't be determined is left out of the breakdown
+		# rather than guessed into a class (D23 - no built-in codes).
+		code = (entry.get("tax_type_code") or "").upper()
+		if code in totals:
+			totals[code] += abs(float(entry.get("total_amount") or 0))
 
 	rows = []
 	for code in ("A", "B", "C", "D", "E"):
@@ -100,6 +101,20 @@ def get_digitax_print_items(doc, digitax_settings=None):
 	logger = frappe.logger("digitax_integration", allow_site=True, file_count=10)
 	built = build_digitax_items_payload(doc, digitax_settings, logger, dry_run=True)
 
+	def tax_type_for(digitax_id=None, item_code=None):
+		# Credit-note lines don't carry item_tax_type_code, and fallback lines are raw
+		# invoice rows - read the real class from the Digitax Item, else the company's
+		# optional default, else leave it unknown.
+		code = None
+		if digitax_id:
+			code = frappe.db.get_value("Digitax Item", {"digitax_id": digitax_id, "company": doc.company}, "tax_type_code")
+		elif item_code:
+			from titan_digitax.titan_digitax.utils.digitax_item_sync import get_digitax_item_for_invoice_item
+
+			linked = get_digitax_item_for_invoice_item(item_code, doc.company)
+			code = frappe.db.get_value("Digitax Item", linked, "tax_type_code") if linked else None
+		return code or digitax_settings.get("default_item_tax_type_code") or None
+
 	if built.get("ok"):
 		raw_items = built["items"]
 		return [
@@ -108,9 +123,7 @@ def get_digitax_print_items(doc, digitax_settings=None):
 				"quantity": entry.get("quantity") or 1,
 				"unit_price": entry.get("unit_price") or 0,
 				"total_amount": entry.get("total_amount") or 0,
-				# Only set for sales, never for credit notes - no per-item tax type
-				# exists to prorate against on the return side either way.
-				"tax_type_code": entry.get("item_tax_type_code") or "D",
+				"tax_type_code": entry.get("item_tax_type_code") or tax_type_for(digitax_id=entry.get("id")),
 				"currency": currency,
 				"formatted_unit_price": fmt_money(entry.get("unit_price") or 0, currency=currency),
 				"formatted_total_amount": fmt_money(entry.get("total_amount") or 0, currency=currency),
@@ -120,15 +133,14 @@ def get_digitax_print_items(doc, digitax_settings=None):
 
 	# Nothing valid was built for Digitax (e.g. item master data drifted since the
 	# original send) — fall back to the raw invoice lines so the printout isn't
-	# empty. No real tax_type_code available here, defaults to "D" in the tax
-	# breakdown below like any other fallback item.
+	# empty, with each row's tax class resolved the same way as above.
 	return [
 		{
 			"item_name": row.item_name or row.description or row.item_code,
 			"quantity": abs(row.qty or 1),
 			"unit_price": abs(row.rate or 0),
 			"total_amount": abs(row.amount or 0),
-			"tax_type_code": "D",
+			"tax_type_code": tax_type_for(item_code=row.item_code),
 			"currency": currency,
 			"formatted_unit_price": fmt_money(abs(row.rate or 0), currency=currency),
 			"formatted_total_amount": fmt_money(abs(row.amount or 0), currency=currency),

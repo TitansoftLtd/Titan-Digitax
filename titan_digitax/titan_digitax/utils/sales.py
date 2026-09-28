@@ -358,8 +358,8 @@ def _send_sales_invoice_to_digitax_impl(docname):
 
     endpoint = ""
     # Get invoice status codes from settings
-    submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
-    cancelled_status = digitax_settings.get("cancelled_invoice_status_code") or "04"
+    submitted_status = digitax_settings.get("submitted_invoice_status_code")
+    cancelled_status = digitax_settings.get("cancelled_invoice_status_code")
     
     # Persist the trader invoice number BEFORE sending. DigiTax echoes this value back
     # on the async callback, which resolves the invoice by
@@ -393,7 +393,7 @@ def _send_sales_invoice_to_digitax_impl(docname):
     if not doc.is_return:
         endpoint = "sales-with-items"
         payload["sale_date"] = str(doc.posting_date)
-        payload["receipt_type_code"] = digitax_settings.get("default_receipt_type_code") or "S"
+        payload["receipt_type_code"] = digitax_settings.get("default_receipt_type_code")
         payload["payment_type_code"] = digitax_settings.get("default_payment_type_code") or "01"
         logger.info(f"Invoice Type: Regular Sales Invoice")
     else:
@@ -1556,7 +1556,7 @@ def _build_virtual_reversal_payload(doc, digitax_settings, state, logger):
     if not built.get("ok"):
         return built
 
-    submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
+    submitted_status = digitax_settings.get("submitted_invoice_status_code")
     payload = {
         "trader_invoice_number": state["next_reversal_trader_invoice_number"],
         "items": built["items"],
@@ -1583,14 +1583,14 @@ def _build_virtual_sale_payload(doc, digitax_settings, state, logger):
     if not built.get("ok"):
         return built
 
-    submitted_status = digitax_settings.get("submitted_invoice_status_code") or "02"
+    submitted_status = digitax_settings.get("submitted_invoice_status_code")
     payload = {
         "trader_invoice_number": state["next_sale_trader_invoice_number"],
         "items": built["items"],
         "invoice_status_code": submitted_status,
         "callback_url": get_digitax_callback_url_for_sales_with_items(doc.company),
         "sale_date": _get_digitax_correction_date(),
-        "receipt_type_code": digitax_settings.get("default_receipt_type_code") or "S",
+        "receipt_type_code": digitax_settings.get("default_receipt_type_code"),
         "payment_type_code": digitax_settings.get("default_payment_type_code") or "01",
     }
 

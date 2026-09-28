@@ -24,14 +24,11 @@
   "api_key_fingerprint",
   "callback_token",
   "item_settings_tab",
-  "school_fees_item_section",
-  "default_item_bar_code",
-  "column_break_school_fees",
-  "default_is_stockable",
   "default_item_settings_section",
   "default_item_class_code",
   "default_item_type_code",
   "default_item_tax_type_code",
+  "default_item_bar_code",
   "column_break_items",
   "default_origin_nation_code",
   "default_package_unit_code",
@@ -229,97 +226,79 @@
    "options": "User"
   },
   {
+   "description": "Optional. Only useful when most of this company's Digitax Items share the same codes - e.g. a school where every item is a fee. Any value set here is copied into a Digitax Item's empty fields when the item is created or saved; the item can still be changed afterwards. Leave all of these blank to make every Digitax Item carry its own codes (the form will then require them).",
    "fieldname": "default_item_settings_section",
    "fieldtype": "Section Break",
    "label": "Default Item Settings"
   },
   {
-   "default": "99020000",
-   "description": "Fallback item class code when not specified on item (default: 99020000)",
+   "description": "KRA item classification code (e.g. 99020000). Fills a Digitax Item's Item Class Code when empty. Also used for invoice lines sent without a Digitax Item (only possible with Require Digitax Item Name off) - such sends are blocked if this is blank.",
    "fieldname": "default_item_class_code",
    "fieldtype": "Data",
    "label": "Default Item Class Code"
   },
   {
-   "default": "3",
-   "description": "Fallback item type code for DigiTax item create (default: 3)",
+   "description": "KRA item type code (1 = raw material, 2 = finished product, 3 = service). Fills a Digitax Item's Item Type Code when empty.",
    "fieldname": "default_item_type_code",
    "fieldtype": "Data",
    "label": "Default Item Type Code"
   },
   {
-   "description": "Fallback tax type code when not specified on item (default: D)",
+   "description": "KRA tax type (A = exempt, B = 16% VAT, C = 0%, D = non-VAT, E = 8%). Fills a Digitax Item's Tax Type Code when empty. Also used for invoice lines sent without a Digitax Item - such sends are blocked if this is blank.",
    "fieldname": "default_item_tax_type_code",
    "fieldtype": "Select",
    "label": "Default Item Tax Type Code",
    "options": "\nA\nB\nC\nD\nE"
   },
   {
-   "fieldname": "column_break_items",
-   "fieldtype": "Column Break"
-  },
-  {
-   "default": "KE",
-   "description": "Fallback origin nation code for DigiTax item create (default: KE)",
-   "fieldname": "default_origin_nation_code",
-   "fieldtype": "Data",
-   "label": "Default Origin Nation Code"
-  },
-  {
-   "default": "NT",
-   "description": "Fallback package unit code for DigiTax item create (default: NT)",
-   "fieldname": "default_package_unit_code",
-   "fieldtype": "Data",
-   "label": "Default Package Unit Code"
-  },
-  {
-   "default": "U",
-   "description": "Fallback quantity unit code for DigiTax item create (default: U)",
-   "fieldname": "default_quantity_unit_code",
-   "fieldtype": "Data",
-   "label": "Default Quantity Unit Code"
-  },
-  {
-   "fieldname": "school_fees_item_section",
-   "fieldtype": "Section Break",
-   "label": "Default Item Details"
-  },
-  {
-   "default": "SCHOOL_FEES",
-   "description": "Default item bar code used when a line has no matching Digitax Item (default: SCHOOL_FEES)",
+   "description": "Fills a Digitax Item's Item Bar Code when empty (e.g. SCHOOL_FEES). DigiTax needs a barcode on every invoice line; sends always use the one stored on the item.",
    "fieldname": "default_item_bar_code",
    "fieldtype": "Data",
    "label": "Default Item Bar Code"
   },
   {
-   "fieldname": "column_break_school_fees",
+   "fieldname": "column_break_items",
    "fieldtype": "Column Break"
   },
   {
-   "default": "0",
-   "description": "Whether the default item is stockable (default: No)",
-   "fieldname": "default_is_stockable",
-   "fieldtype": "Check",
-   "label": "Default Is Stockable"
+   "description": "Country the item originates from, as a 2-letter code (e.g. KE). Fills a Digitax Item's Origin Nation Code when empty.",
+   "fieldname": "default_origin_nation_code",
+   "fieldtype": "Data",
+   "label": "Default Origin Nation Code"
   },
   {
+   "description": "KRA packaging unit code (e.g. NT = no packaging). Fills a Digitax Item's Package Unit Code when empty.",
+   "fieldname": "default_package_unit_code",
+   "fieldtype": "Data",
+   "label": "Default Package Unit Code"
+  },
+  {
+   "description": "KRA quantity unit code (e.g. U = unit/piece). Fills a Digitax Item's Quantity Unit Code when empty.",
+   "fieldname": "default_quantity_unit_code",
+   "fieldtype": "Data",
+   "label": "Default Quantity Unit Code"
+  },
+  {
+   "description": "Codes DigiTax/KRA require on every filing. The read-only ones are fixed by DigiTax's own code lists and are the same for every company; only the Payment Type Code is a per-company choice.",
    "fieldname": "invoice_status_codes_section",
    "fieldtype": "Section Break",
    "label": "Invoice Status Codes"
   },
   {
    "default": "02",
-   "description": "Status code for submitted invoices (default: 02)",
+   "description": "Fixed: 02 = Approved. Sent as invoice_status_code on every sale - the only valid status for a new, final sale (DigiTax has no way to change a sale's status afterwards; corrections go through credit notes).",
    "fieldname": "submitted_invoice_status_code",
    "fieldtype": "Data",
-   "label": "Submitted Invoice Status Code"
+   "label": "Submitted Invoice Status Code",
+   "read_only": 1
   },
   {
    "default": "S",
-   "description": "Receipt type code for sales invoices (default: S)",
+   "description": "Fixed: S = Sale. Sent on sales; DigiTax marks this field deprecated and ignores it (it tells sales and credit notes apart by endpoint).",
    "fieldname": "default_receipt_type_code",
    "fieldtype": "Data",
-   "label": "Default Receipt Type Code"
+   "label": "Receipt Type Code",
+   "read_only": 1
   },
   {
    "fieldname": "column_break_status",
@@ -327,14 +306,15 @@
   },
   {
    "default": "04",
-   "description": "Status code for cancelled/draft invoices (default: 04)",
+   "description": "Fixed: 04 = Canceled. Only chosen for an invoice that is not submitted, which the normal send paths never send.",
    "fieldname": "cancelled_invoice_status_code",
    "fieldtype": "Data",
-   "label": "Cancelled Invoice Status Code"
+   "label": "Cancelled Invoice Status Code",
+   "read_only": 1
   },
   {
    "default": "01",
-   "description": "Payment type code for invoices (default: 01 = Cash)",
+   "description": "How customers pay, as KRA records it on every sale: 01 Cash, 02 Credit (invoice now, pay later), 03 Cash/Credit, 04 Bank cheque, 05 Card, 06 Mobile money, 07 Other. One code applies to all of this company's sales.",
    "fieldname": "default_payment_type_code",
    "fieldtype": "Data",
    "label": "Default Payment Type Code"
@@ -375,7 +355,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-09-27 12:00:00.000000",
+ "modified": "2026-09-28 23:45:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Company Settings",

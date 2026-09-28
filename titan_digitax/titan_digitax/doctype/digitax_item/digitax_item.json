@@ -19,6 +19,10 @@
   "quantity_unit_code",
   "pricing_section",
   "default_unit_price",
+  "invoice_line_section",
+  "item_bar_code",
+  "column_break_invoice_line",
+  "is_stockable",
   "sync_status_tab",
   "digitax_id",
   "etims_item_code",
@@ -94,7 +98,6 @@
    "fieldtype": "Column Break"
   },
   {
-   "default": "KE",
    "fieldname": "origin_nation_code",
    "fieldtype": "Data",
    "label": "Origin Nation Code",
@@ -123,6 +126,29 @@
    "fieldtype": "Currency",
    "label": "Default Unit Price",
    "reqd": 1
+  },
+  {
+   "description": "Sent on every invoice line that uses this item. Not part of DigiTax's catalogue, so Sync to Digitax does not check them.",
+   "fieldname": "invoice_line_section",
+   "fieldtype": "Section Break",
+   "label": "Invoice Line Details"
+  },
+  {
+   "description": "Sent to DigiTax as item_bar_code. Required to send any invoice using this item - sends are blocked while it is blank.",
+   "fieldname": "item_bar_code",
+   "fieldtype": "Data",
+   "label": "Item Bar Code"
+  },
+  {
+   "fieldname": "column_break_invoice_line",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "0",
+   "description": "Sent to DigiTax as is_stockable on sales.",
+   "fieldname": "is_stockable",
+   "fieldtype": "Check",
+   "label": "Is Stockable"
   },
   {
    "fieldname": "sync_status_tab",
@@ -154,7 +180,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-05 10:00:00.000000",
+ "modified": "2026-09-28 23:30:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Item",

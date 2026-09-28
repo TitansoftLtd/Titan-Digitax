@@ -126,6 +126,46 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=Fals
 			)
 			continue
 
+		# item_bar_code is required by both DigiTax endpoints on every line, and is
+		# per item (D23) - never a company-wide default. Unlike the D14 toggles
+		# above, it can't be switched off: DigiTax rejects a line without one.
+		# The classification codes likewise come from the Digitax Item (where they're
+		# mandatory). A line sent without one (D14 name requirement off) can only use
+		# the company's optional defaults - there is no built-in fallback (D23).
+		if digitax_item:
+			bar_code = (digitax_item.item_bar_code or "").strip()
+			is_stockable = bool(digitax_item.is_stockable)
+			class_code = digitax_item.item_class_code
+			tax_type_code = digitax_item.tax_type_code
+		else:
+			bar_code = _get_erp_item_bar_code(item_code)
+			is_stockable = bool(frappe.db.get_value("Item", item_code, "is_stock_item"))
+			class_code = digitax_settings.get("default_item_class_code")
+			tax_type_code = digitax_settings.get("default_item_tax_type_code")
+
+		if use_sale_fields and not (class_code and tax_type_code):
+			gate_failures.append(
+				{
+					"item_code": item_code,
+					"item_name": item_name,
+					"amount": amount,
+					"reason": "missing_item_codes",
+				}
+			)
+			continue
+
+		if not bar_code:
+			gate_failures.append(
+				{
+					"item_code": item_code,
+					"item_name": item_name,
+					"amount": amount,
+					"reason": "missing_item_bar_code",
+					"digitax_item": digitax_item.name if digitax_item else None,
+				}
+			)
+			continue
+
 		# Aggregate by display name (plan §2.1 v1: qty=1, sum amounts)
 		line_amount = abs(float(amount or 0))
 		if display_name in items_dict:
@@ -155,25 +195,16 @@ def build_digitax_items_payload(doc, digitax_settings, logger=None, dry_run=Fals
 			}
 			if digitax_id:
 				entry["id"] = digitax_id
-			# item_bar_code is required by both DigiTax endpoints (sales-with-items and
-			# credit-notes-with-barcode — the latter's name says as much), so it's set
-			# unconditionally. The other fields below identify/register a brand new item
-			# and are only meaningful on the sales side; credit notes reference an
-			# already-registered item by id/barcode instead.
-			entry["item_bar_code"] = digitax_settings.get("default_item_bar_code") or "SCHOOL_FEES"
+			# item_bar_code goes on both endpoints (sales-with-items and
+			# credit-notes-with-barcode). The other fields below identify/register a
+			# brand new item and are only meaningful on the sales side; credit notes
+			# reference an already-registered item by id/barcode instead.
+			entry["item_bar_code"] = bar_code
 			if use_sale_fields:
 				entry["item_name"] = display_name
-				entry["item_class_code"] = (
-					(digitax_item.item_class_code if digitax_item else None)
-					or digitax_settings.get("default_item_class_code")
-					or "99020000"
-				)
-				entry["item_tax_type_code"] = (
-					(digitax_item.tax_type_code if digitax_item else None)
-					or digitax_settings.get("default_item_tax_type_code")
-					or "D"
-				)
-				entry["is_stockable"] = bool(digitax_settings.get("default_is_stockable"))
+				entry["item_class_code"] = class_code
+				entry["item_tax_type_code"] = tax_type_code
+				entry["is_stockable"] = is_stockable
 			items_dict[display_name] = entry
 
 	if gate_failures:
@@ -311,9 +342,22 @@ def _apply_discounts(doc, items_dict, discount_items, total_discounts, log, dry_
 	return None
 
 
+def _get_erp_item_bar_code(item_code):
+	"""First barcode on the ERPNext Item - used only for lines sent without a
+	Digitax Item (D14 name requirement off)."""
+	return (
+		frappe.db.get_value(
+			"Item Barcode", {"parent": item_code, "parenttype": "Item"}, "barcode", order_by="idx asc"
+		)
+		or ""
+	).strip()
+
+
 def _block_gate_failures(doc, gate_failures, require_name, require_sync, log, dry_run=False):
 	missing_links = [g for g in gate_failures if g["reason"] == "missing_digitax_item_link"]
 	missing_ids = [g for g in gate_failures if g["reason"] == "missing_digitax_id"]
+	missing_bar_codes = [g for g in gate_failures if g["reason"] == "missing_item_bar_code"]
+	missing_codes = [g for g in gate_failures if g["reason"] == "missing_item_codes"]
 
 	parts = []
 	if missing_links:
@@ -326,8 +370,21 @@ def _block_gate_failures(doc, gate_failures, require_name, require_sync, log, dr
 			f"{len(missing_ids)} item(s) linked to a Digitax Item that isn't synced yet: "
 			+ ", ".join(f"{g['item_code']}" for g in missing_ids[:5])
 		)
+	if missing_bar_codes:
+		# Several invoice lines usually share one Digitax Item - name each once.
+		without_bar_code = list(dict.fromkeys(g.get("digitax_item") or g["item_code"] for g in missing_bar_codes))
+		parts.append(
+			f"{len(without_bar_code)} item(s) with no Item Bar Code (DigiTax requires one on every line): "
+			+ ", ".join(without_bar_code[:5])
+		)
+	if missing_codes:
+		parts.append(
+			f"{len(missing_codes)} item(s) sent without a Digitax Item, and this company has no "
+			f"Default Item Class Code / Default Item Tax Type Code: "
+			+ ", ".join(g["item_code"] for g in missing_codes[:5])
+		)
 	error_msg = "; ".join(parts)
-	if require_name or require_sync:
+	if (missing_links or missing_ids) and (require_name or require_sync):
 		error_msg += ". DigiTax send blocked by Digitax Company Settings gates."
 
 	if not dry_run:
@@ -339,7 +396,10 @@ def _block_gate_failures(doc, gate_failures, require_name, require_sync, log, dr
 				f"<p>{error_msg}</p>"
 				f"<ul>{''.join(f'<li>{g['item_code']} - {g['item_name']} ({g['reason']})</li>' for g in gate_failures)}</ul>"
 			),
-			action_required="Link a Digitax Item and/or Sync it to Digitax for the listed Items",
+			action_required=(
+				"Link a Digitax Item, Sync it to Digitax, and/or set its Item Bar Code "
+				"(or the ERPNext Item's barcode, if sent without a Digitax Item) for the listed Items"
+			),
 			reference_doctype="Sales Invoice",
 			reference_name=doc.name,
 			related_data=frappe.as_json({"gate_failures": gate_failures}),
