@@ -185,13 +185,13 @@ Item. That's only possible when *Require Digitax Item Name* is off (below). Such
 **blocked** if these two are empty.
 
 **Item Sync Overrides.** These control how strictly invoice lines must be tied to DigiTax.
+Linking Items to Digitax Items and clicking **Sync to Digitax** are done by hand in this app. A
+companion app, such as a school's invoice sync, may do both automatically under its own settings.
 
 | Field | Default | What it means |
 |---|---|---|
 | **Require Digitax Item Name** | On | Every invoice line's Item must be **linked to a Digitax Item** of this company. DigiTax only ever sees the Digitax Item's name, never your internal ERPNext item name. Lines are grouped by Digitax Item, so an invoice with 5 fee items all linked to "School Fees" is filed as **one** line. Turn it off only if you want DigiTax to see your ERPNext item names directly. |
 | **Require Manual Item Sync** | On | The linked Digitax Item must already be **registered with DigiTax** (it has a Digitax ID; see *Sync to Digitax*). Otherwise the send is blocked. |
-| **Auto Sync Items to Digitax** | Off | Lets a companion app register Digitax Items with DigiTax automatically. **On its own this app doesn't use it.** Without such an app, register items with the **Sync to Digitax** button. |
-| **Auto Match Items by Name** | Off | Lets a companion app link newly created ERPNext Items to an existing Digitax Item automatically. **On its own this app doesn't use it.** Without such an app, link Items by hand. |
 
 ### Tab: Role Settings
 

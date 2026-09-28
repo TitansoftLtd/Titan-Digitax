@@ -36,9 +36,6 @@
   "item_sync_overrides_section",
   "require_digitax_item_name",
   "require_manual_item_sync",
-  "column_break_d14",
-  "auto_sync_items_to_digitax",
-  "auto_match_items_by_name",
   "role_settings_tab",
   "digitax_roles_section",
   "send_role",
@@ -173,22 +170,6 @@
    "fieldname": "require_manual_item_sync",
    "fieldtype": "Check",
    "label": "Require Manual Item Sync"
-  },
-  {
-   "fieldname": "column_break_d14",
-   "fieldtype": "Column Break"
-  },
-  {
-   "default": "0",
-   "fieldname": "auto_sync_items_to_digitax",
-   "fieldtype": "Check",
-   "label": "Auto Sync Items to Digitax"
-  },
-  {
-   "default": "0",
-   "fieldname": "auto_match_items_by_name",
-   "fieldtype": "Check",
-   "label": "Auto Match Items by Name"
   },
   {
    "fieldname": "digitax_roles_section",
@@ -355,7 +336,7 @@
  ],
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-09-28 23:45:00.000000",
+ "modified": "2026-09-29 11:00:00.000000",
  "modified_by": "Administrator",
  "module": "Titan Digitax",
  "name": "Digitax Company Settings",
